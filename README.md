@@ -52,7 +52,26 @@ This plugin exposes OpenCode Go as a single provider (`opencode-go`) backed by a
 - **Thinking & Reasoning Support**: Maps reasoning effort across supported client and upstream formats.
 - **Dynamic Catalog Discovery**: Fetches remote model catalogs with an in-memory last-good snapshot and custom route overrides.
 - **Multi-Key Auth Scheduling**: Pools multiple API keys with CLIProxyAPI's native scheduler for rotation, retries, and error cooldowns across all protocols.
-- **OpenCode Go Quota Page**: Management Center includes a separate `OpenCode Go Quota` page. Page load lists credentials without contacting OpenCode; each card is refreshed manually and independently, and quota values do not affect routing or CPA's native quota page.
+- **Native Quota Integration**: Implements CPA's standard quota provider for `opencode-go` credentials, so Management Center can show the upstream rolling, weekly, and monthly windows in its native quota page. Queries use the credential selected by CPA and its host HTTP transport. No additional configuration, listener, or CPA core rebuild is required; rebuild the plugin DLL to use this capability.
+- **OpenCode Go Quota Page**: The separate `OpenCode Go Quota` page remains available. Page load lists configured credentials without contacting OpenCode; each card is refreshed manually and independently. Both quota interfaces share upstream response validation, and quota queries do not alter scheduling or reset upstream usage.
+
+### Quota behavior
+
+The standard quota capability uses `GET {base-url}/usage` with the selected
+credential's Bearer key. The host's plugin quota endpoint accepts an `auth_index`,
+not an upstream key supplied by the browser. The plugin converts the reported
+used percentage to CPA's `remainingFraction` and preserves upstream reset times.
+Quota queries share inference's key lookup order: attributes, metadata, then
+persisted JSON; a present but invalid key source is rejected without fallback.
+Decimal percentages are supported. Missing windows, missing percentages, and
+malformed data return an error rather than a full-quota result. Upstream error
+bodies and credentials are not included in quota errors.
+
+These are the windows reported by the upstream usage endpoint; the plugin does
+not infer separate limits for every model, a subscription tier, a dollar balance,
+or a remaining request count. Quota reset is unsupported. The native UI uses
+CPA's management authentication; only the standalone plugin page needs its
+existing remembered-management-password mechanism.
 
 ## Requirements
 
