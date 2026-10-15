@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -17,9 +18,9 @@ import (
 )
 
 type quotaWindow struct {
-	Status   string `json:"status"`
-	Percent  int    `json:"percent"`
-	ResetsAt string `json:"resets_at"`
+	Status   string  `json:"status"`
+	Percent  float64 `json:"percent"`
+	ResetsAt string  `json:"resets_at"`
 }
 
 type quotaUsage struct {
@@ -40,16 +41,16 @@ type quotaRequest struct {
 
 type usageResponse struct {
 	Usage struct {
-		Rolling quotaUpstreamWindow `json:"rolling"`
-		Weekly  quotaUpstreamWindow `json:"weekly"`
-		Monthly quotaUpstreamWindow `json:"monthly"`
+		Rolling *quotaUpstreamWindow `json:"rolling"`
+		Weekly  *quotaUpstreamWindow `json:"weekly"`
+		Monthly *quotaUpstreamWindow `json:"monthly"`
 	} `json:"usage"`
 }
 
 type quotaUpstreamWindow struct {
-	Status   string `json:"status"`
-	Percent  int    `json:"percent"`
-	ResetsAt string `json:"resetsAt"`
+	Status   string   `json:"status"`
+	Percent  *float64 `json:"percent"`
+	ResetsAt string   `json:"resetsAt"`
 }
 
 func quotaIdentity(key string) (id, label string) {
@@ -117,12 +118,16 @@ func quotaJSON(v any) (pluginapi.ManagementResponse, error) {
 }
 
 func fetchQuota(ctx context.Context, bridge *HostBridge, baseURL string, timeout time.Duration, key string) (quotaUsage, error) {
+	return fetchQuotaWithCallback(ctx, bridge, baseURL, timeout, key, "")
+}
+
+func fetchQuotaWithCallback(ctx context.Context, bridge *HostBridge, baseURL string, timeout time.Duration, key, callbackID string) (quotaUsage, error) {
 	if bridge == nil {
 		return quotaUsage{}, fmt.Errorf("quota bridge unavailable")
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	resp, err := bridge.Do(ctx, pluginapi.HTTPRequest{Method: http.MethodGet, URL: strings.TrimRight(baseURL, "/") + "/usage", Headers: http.Header{"Authorization": []string{"Bearer " + key}, "Accept": []string{"application/json"}}})
+	resp, err := bridge.DoWithCallback(ctx, pluginapi.HTTPRequest{Method: http.MethodGet, URL: strings.TrimRight(baseURL, "/") + "/usage", Headers: http.Header{"Authorization": []string{"Bearer " + key}, "Accept": []string{"application/json"}}}, callbackID)
 	if err != nil || resp.StatusCode != http.StatusOK {
 		return quotaUsage{}, fmt.Errorf("quota upstream request failed")
 	}
@@ -130,9 +135,19 @@ func fetchQuota(ctx context.Context, bridge *HostBridge, baseURL string, timeout
 	if err := json.Unmarshal(resp.Body, &decoded); err != nil {
 		return quotaUsage{}, fmt.Errorf("quota response invalid")
 	}
+	for _, window := range []*quotaUpstreamWindow{decoded.Usage.Rolling, decoded.Usage.Weekly, decoded.Usage.Monthly} {
+		if window == nil || strings.TrimSpace(window.Status) == "" || window.Percent == nil || math.IsNaN(*window.Percent) || math.IsInf(*window.Percent, 0) || *window.Percent < 0 {
+			return quotaUsage{}, fmt.Errorf("quota response has invalid or missing windows")
+		}
+		if window.ResetsAt != "" {
+			if _, err := time.Parse(time.RFC3339Nano, window.ResetsAt); err != nil {
+				return quotaUsage{}, fmt.Errorf("quota response has invalid reset time")
+			}
+		}
+	}
 	return quotaUsage{
-		Rolling: quotaWindow{Status: decoded.Usage.Rolling.Status, Percent: decoded.Usage.Rolling.Percent, ResetsAt: decoded.Usage.Rolling.ResetsAt},
-		Weekly:  quotaWindow{Status: decoded.Usage.Weekly.Status, Percent: decoded.Usage.Weekly.Percent, ResetsAt: decoded.Usage.Weekly.ResetsAt},
-		Monthly: quotaWindow{Status: decoded.Usage.Monthly.Status, Percent: decoded.Usage.Monthly.Percent, ResetsAt: decoded.Usage.Monthly.ResetsAt},
+		Rolling: quotaWindow{Status: decoded.Usage.Rolling.Status, Percent: *decoded.Usage.Rolling.Percent, ResetsAt: decoded.Usage.Rolling.ResetsAt},
+		Weekly:  quotaWindow{Status: decoded.Usage.Weekly.Status, Percent: *decoded.Usage.Weekly.Percent, ResetsAt: decoded.Usage.Weekly.ResetsAt},
+		Monthly: quotaWindow{Status: decoded.Usage.Monthly.Status, Percent: *decoded.Usage.Monthly.Percent, ResetsAt: decoded.Usage.Monthly.ResetsAt},
 	}, nil
 }

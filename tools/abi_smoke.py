@@ -1,7 +1,8 @@
 """Offline Windows C ABI smoke test. No network, files of CPA, or listening ports.
 
 Usage: python tools/abi_smoke.py path/to/opencode-go-unified.dll
-The fake host keeps auth records in memory and returns deterministic inference.
+The fake host keeps auth records in memory, returns deterministic inference,
+and serves a deterministic OpenCode Go /usage fixture for the quota provider.
 """
 import base64
 import ctypes as C
@@ -41,9 +42,17 @@ def main(path):
     emitted = []
     key = "sk-offline-fixture-1"
     model = "gemini-4-argon-contributor"
+    quota_callback = "callback-quota-offline"
+    quota_reset_at = "2026-10-15T12:00:00Z"
+    quota_seen = []
     response = {"candidates": [{"index": 0, "content": {"role": "model", "parts": [{"text": "offline OK", "thoughtSignature": "AQID"}]}, "finishReason": "STOP"}], "usageMetadata": {"promptTokenCount": 2, "candidatesTokenCount": 1, "totalTokenCount": 3}}
     wire = ("data: " + json.dumps(response, separators=(",", ":")) + "\r\n\r\n").encode()
     chunks = [wire[:5], wire[5:17], wire[17:]]
+    quota_fixture = {"usage": {
+        "rolling": {"status": "ok", "percent": 4, "resetsAt": quota_reset_at},
+        "weekly": {"status": "ok", "percent": 7, "resetsAt": quota_reset_at},
+        "monthly": {"status": "ok", "percent": 41, "resetsAt": quota_reset_at},
+    }}
 
     @Free
     def free(ptr, _size):
@@ -61,8 +70,17 @@ def main(path):
             if method == "host.auth.list":
                 result = {"files": []}
             elif method == "host.http.do":
-                assert req["url"].endswith("/models"), "unexpected nonstream URL"
-                result = {"StatusCode": 200, "Headers": {}, "Body": b64(json.dumps({"data": [{"id": model}, {"id": "glm-5.3"}, {"id": "gpt-5.6-luna"}, {"id": "minimax-m3"}]}))}
+                if req.get("host_callback_id") == quota_callback:
+                    assert req["method"] == "GET", "quota upstream must use GET"
+                    assert req["url"] == "https://opencode.ai/inference/go/v1/usage", req["url"]
+                    headers = {name.lower(): values for name, values in req["headers"].items()}
+                    assert headers["authorization"] == ["Bearer " + key], headers
+                    assert headers["accept"] == ["application/json"], headers
+                    quota_seen.append(req)
+                    result = {"StatusCode": 200, "Headers": {}, "Body": b64(json.dumps(quota_fixture))}
+                else:
+                    assert req["url"].endswith("/models"), "unexpected nonstream URL"
+                    result = {"StatusCode": 200, "Headers": {}, "Body": b64(json.dumps({"data": [{"id": model}, {"id": "glm-5.3"}, {"id": "gpt-5.6-luna"}, {"id": "minimax-m3"}]}))}
             elif method == "host.http.do_stream":
                 assert req["host_callback_id"] == "callback-offline"
                 assert req["url"] == f"https://opencode.ai/inference/go/v1/models/{model}:streamGenerateContent?alt=sse"
@@ -100,15 +118,17 @@ def main(path):
     assert init(C.byref(host), C.byref(plug)) == 0
     assert plug.abi_version == 1
 
-    def invoke(method, request):
+    def invoke(method, request, expect_ok=True):
         encoded = json.dumps(request).encode()
         buf = C.create_string_buffer(encoded)
         output = Buffer()
         assert plug.call(method.encode(), C.cast(buf, C.c_void_p), len(encoded), C.byref(output)) == 0
         try:
             envelope = json.loads(C.string_at(output.ptr, output.len))
-            assert envelope["ok"], envelope.get("error")
-            return envelope["result"]
+            if expect_ok:
+                assert envelope["ok"], envelope.get("error")
+                return envelope["result"]
+            return envelope
         finally:
             plug.free_buffer(output.ptr, output.len)
 
@@ -118,6 +138,40 @@ def main(path):
         assert meta.get("Name", meta.get("name")) == "opencode-go-unified"
         assert reg["schema_version"] == 6
         assert "gemini" in reg["capabilities"]["executor_input_formats"]
+        assert reg["capabilities"].get("quota_provider") is True, reg["capabilities"]
+        identifier = invoke("quota.identifier", {})
+        assert identifier.get("identifier") == "opencode-go", identifier
+        described = invoke("quota.describe", {})
+        assert described.get("supported_providers") == ["opencode-go"], described
+        assert described.get("display_name") == "OpenCode Go", described
+        # SDK QuotaDescribeResponse.SupportsReset carries omitempty; absence means false.
+        assert described.get("supports_reset", False) is False, described
+        fetched = invoke("quota.fetch", {
+            "provider": "opencode-go",
+            "auth_id": "auth-offline-quota",
+            "auth_index": "0",
+            "attributes": {"api_key": key},
+            "host_callback_id": quota_callback,
+        })
+        groups = fetched.get("groups") or []
+        assert len(groups) == 1, groups
+        group = groups[0]
+        assert group.get("displayName", group.get("display_name")) == "OpenCode Go", group
+        buckets = group.get("buckets") or []
+        assert len(buckets) == 3, buckets
+        by_window = {bucket.get("window"): bucket for bucket in buckets}
+        assert set(by_window) == {"rolling", "weekly", "monthly"}, by_window
+        for window, percent in (("rolling", 4.0), ("weekly", 7.0), ("monthly", 41.0)):
+            bucket = by_window[window]
+            remaining = bucket.get("remainingFraction", bucket.get("remaining_fraction"))
+            assert remaining is not None and abs(remaining - (1 - percent / 100)) <= 1e-9, bucket
+            assert bucket.get("resetTime", bucket.get("reset_time")) == quota_reset_at, bucket
+            assert bucket.get("description") == window + " (ok)", bucket
+        assert len(quota_seen) == 1, quota_seen
+        reset = invoke("quota.reset", {"provider": "opencode-go", "auth_id": "auth-offline-quota", "auth_index": "0"}, expect_ok=False)
+        assert reset.get("ok") is False, reset
+        assert (reset.get("error") or {}).get("code") == "unsupported", reset
+        assert len(quota_seen) == 1, "quota.reset must not call upstream"
         listed = invoke("model.static", {})
         records = listed.get("Models", listed.get("models", []))
         assert len(records) == 4
@@ -128,7 +182,7 @@ def main(path):
         assert any(b"thoughtSignature" in chunk for chunk in emitted)
         assert any(b"usageMetadata" in chunk for chunk in emitted)
         assert not failures, failures
-        print(json.dumps({"abi": 1, "schema": 6, "catalog_models": len(records), "stream_chunks": len(emitted), "host_calls": len(calls), "network_requests": 0, "listeners_started": 0, "result": "PASS"}))
+        print(json.dumps({"abi": 1, "schema": 6, "catalog_models": len(records), "quota_buckets": len(buckets), "stream_chunks": len(emitted), "host_calls": len(calls), "network_requests": 0, "listeners_started": 0, "result": "PASS"}))
     finally:
         plug.shutdown()
     assert not held, "host callback buffers leaked"

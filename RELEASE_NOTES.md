@@ -1,3 +1,15 @@
+## Unreleased: native OpenCode Go quota support
+
+- Register CPA's standard `QuotaProvider` for `opencode-go`, enabling native
+  Management Center quota discovery without changing or rebuilding CPA core.
+- Query the selected credential through the host HTTP callback and normalize
+  rolling, weekly, and monthly upstream windows into remaining fractions.
+- Preserve the separate quota page, support decimal usage percentages, and
+  reject missing or malformed windows instead of reporting unused quota.
+- Keep credential and upstream error details out of quota errors. Quota reset
+  is explicitly unsupported; no inference calls or background quota polling are
+  introduced.
+
 ## What's Changed
 
 Full OpenAI Codex CLI support across all models: multi-agent namespaces, custom programmatic tools (`exec`), tool call results, and reasoning efforts are fully functional.

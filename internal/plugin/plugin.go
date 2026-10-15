@@ -128,6 +128,18 @@ func (m *Manager) HandleCall(method string, request []byte) (resp []byte, err er
 		return m.registerManagement(request)
 	case pluginabi.MethodManagementHandle:
 		return m.handleManagement(request)
+	case pluginabi.MethodQuotaIdentifier:
+		return okEnvelope(map[string]string{"identifier": ProviderID}), nil
+	case pluginabi.MethodQuotaDescribe:
+		return okEnvelope(pluginapi.QuotaDescribeResponse{
+			SupportedProviders: []string{ProviderID},
+			DisplayName:        "OpenCode Go",
+			SupportsReset:      false,
+		}), nil
+	case pluginabi.MethodQuotaFetch:
+		return m.handleQuotaFetch(request)
+	case pluginabi.MethodQuotaReset:
+		return ErrEnvelope("unsupported", "OpenCode Go quota reset is not supported"), nil
 	case pluginabi.MethodExecutorIdentifier:
 		return okEnvelope(map[string]string{"identifier": ProviderID}), nil
 	case pluginabi.MethodExecutorCountTokens:
@@ -160,6 +172,7 @@ type capabilities struct {
 	ExecutorInputFormats  []string                     `json:"executor_input_formats,omitempty"`
 	ExecutorOutputFormats []string                     `json:"executor_output_formats,omitempty"`
 	ManagementAPI         bool                         `json:"management_api"`
+	QuotaProvider         bool                         `json:"quota_provider"`
 }
 
 type registrationResult struct {
@@ -242,6 +255,7 @@ func registrationEnvelope() []byte {
 			ExecutorInputFormats:  formats,
 			ExecutorOutputFormats: formats,
 			ManagementAPI:         true,
+			QuotaProvider:         true,
 		},
 	})
 }
