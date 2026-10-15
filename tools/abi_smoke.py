@@ -39,11 +39,12 @@ def main(path):
     lock = threading.Lock()
     closed = threading.Event()
     emitted = []
-    key = "sk-offline-fixture-1"
+    key = "sk-offline-selected-fixture-1"
+    configured_key = "sk-offline-config-not-selected"
     model = "gemini-4-argon-contributor"
     response = {"candidates": [{"index": 0, "content": {"role": "model", "parts": [{"text": "offline OK", "thoughtSignature": "AQID"}]}, "finishReason": "STOP"}], "usageMetadata": {"promptTokenCount": 2, "candidatesTokenCount": 1, "totalTokenCount": 3}}
     wire = ("data: " + json.dumps(response, separators=(",", ":")) + "\r\n\r\n").encode()
-    chunks = [wire[:5], wire[5:17], wire[17:]]
+    chunks = []
 
     @Free
     def free(ptr, _size):
@@ -71,6 +72,7 @@ def main(path):
                 assert "x-goog-api-key" not in headers
                 assert headers["x-opencode-session"] == ["offline-session-A"]
                 assert "contents" in json.loads(base64.b64decode(req["body"]))
+                chunks[:] = [wire[:5], wire[5:17], wire[17:]]
                 result = {"status_code": 200, "headers": {"Content-Type": ["text/event-stream"]}, "stream_id": "up-offline"}
             elif method == "host.http.stream_read":
                 result = {"payload": b64(chunks.pop(0))} if chunks else {"done": True}
@@ -100,35 +102,60 @@ def main(path):
     assert init(C.byref(host), C.byref(plug)) == 0
     assert plug.abi_version == 1
 
-    def invoke(method, request):
+    def invoke(method, request, expect_error=False):
         encoded = json.dumps(request).encode()
         buf = C.create_string_buffer(encoded)
         output = Buffer()
         assert plug.call(method.encode(), C.cast(buf, C.c_void_p), len(encoded), C.byref(output)) == 0
         try:
             envelope = json.loads(C.string_at(output.ptr, output.len))
+            if expect_error:
+                assert not envelope["ok"] and envelope.get("error"), "missing credential must fail"
+                return envelope["error"]
             assert envelope["ok"], envelope.get("error")
             return envelope["result"]
         finally:
             plug.free_buffer(output.ptr, output.len)
 
     try:
-        reg = invoke("plugin.register", {"schema_version": 6, "config_yaml": b64("api-keys:\n  - value: " + key + "\n")})
+        reg = invoke("plugin.register", {"schema_version": 6, "config_yaml": b64("api-keys:\n  - value: " + configured_key + "\n")})
         meta = reg["metadata"]
         assert meta.get("Name", meta.get("name")) == "opencode-go-unified"
         assert reg["schema_version"] == 6
-        assert "gemini" in reg["capabilities"]["executor_input_formats"]
+        capabilities = reg["capabilities"]
+        assert capabilities["auth_provider"] is False, "plugin must not advertise OAuth login"
+        assert all(capabilities[name] for name in ("model_provider", "executor", "management_api"))
+        assert capabilities["executor_model_scope"] == "oauth"
+        for name in ("executor_input_formats", "executor_output_formats"):
+            assert set(capabilities[name]) == {"openai", "claude", "openai-response", "gemini"}
         listed = invoke("model.static", {})
         records = listed.get("Models", listed.get("models", []))
         assert len(records) == 4
         body = b64('{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}')
-        invoke("executor.execute_stream", {"AuthProvider": "opencode-go", "AuthAttributes": {"api_key": key}, "Model": "opencode-go/" + model, "SourceFormat": "gemini", "Format": "gemini", "Stream": True, "OriginalRequest": body, "Payload": body, "Headers": {"X-Opencode-Session": ["offline-session-A"]}, "stream_id": "down-offline", "host_callback_id": "callback-offline"})
-        assert closed.wait(15), "DLL stream timed out"
-        assert emitted and all(json.loads(chunk) for chunk in emitted)
-        assert any(b"thoughtSignature" in chunk for chunk in emitted)
-        assert any(b"usageMetadata" in chunk for chunk in emitted)
+        credential_shapes = {
+            "attributes": {"AuthAttributes": {"api_key": key}},
+            "metadata": {"AuthMetadata": {"type": "opencode-go", "api_key": key}},
+            "storage": {"StorageJSON": b64(json.dumps({"type": "opencode-go", "api_key": key}))},
+        }
+        stream_chunks = 0
+        for label, credential in credential_shapes.items():
+            closed.clear()
+            emitted.clear()
+            request = {"AuthID": "opencode-go-key-selected.json", "AuthProvider": "opencode-go", "Model": "opencode-go/" + model, "SourceFormat": "gemini", "Format": "gemini", "Stream": True, "OriginalRequest": body, "Payload": body, "Headers": {"X-Opencode-Session": ["offline-session-A"]}, "stream_id": "down-offline-" + label, "host_callback_id": "callback-offline"}
+            request.update(credential)
+            invoke("executor.execute_stream", request)
+            assert closed.wait(15), "DLL stream timed out: " + label
+            assert emitted and all(json.loads(chunk) for chunk in emitted)
+            assert any(b"thoughtSignature" in chunk for chunk in emitted)
+            assert any(b"usageMetadata" in chunk for chunk in emitted)
+            stream_chunks += len(emitted)
+        request = {"AuthProvider": "opencode-go", "Model": "opencode-go/" + model, "SourceFormat": "gemini", "Format": "gemini", "Stream": True, "OriginalRequest": body, "Payload": body, "stream_id": "down-missing"}
+        upstream_calls = calls.count("host.http.do_stream")
+        missing_error = invoke("executor.execute_stream", request, expect_error=True)
+        assert calls.count("host.http.do_stream") == upstream_calls, "missing credential contacted upstream"
+        assert key not in json.dumps(missing_error) and configured_key not in json.dumps(missing_error)
         assert not failures, failures
-        print(json.dumps({"abi": 1, "schema": 6, "catalog_models": len(records), "stream_chunks": len(emitted), "host_calls": len(calls), "network_requests": 0, "listeners_started": 0, "result": "PASS"}))
+        print(json.dumps({"abi": 1, "schema": 6, "catalog_models": len(records), "advertises_oauth": capabilities["auth_provider"], "credential_shapes": list(credential_shapes), "selected_key_differs_from_config": key != configured_key, "stream_chunks": stream_chunks, "host_calls": len(calls), "network_requests": 0, "listeners_started": 0, "result": "PASS"}))
     finally:
         plug.shutdown()
     assert not held, "host callback buffers leaked"

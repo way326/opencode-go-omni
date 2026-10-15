@@ -11,6 +11,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/url"
 	"strings"
@@ -147,11 +148,16 @@ func (m *Manager) resolveExecution(req executorRequest) (*resolvedExecution, []b
 	if req.AuthProvider != ProviderID {
 		return nil, classEnvelope(&errclass.Error{Class: errclass.ClassAuth, Message: "selected auth provider is not opencode-go"})
 	}
-	key := strings.TrimSpace(req.AuthAttributes["api_key"])
-	debugTrace("executor auth model=%s auth_id=%s provider=%s attr_api_key_present=%t attr_count=%d storage_json_bytes=%d", req.Model, req.AuthID, req.AuthProvider, key != "", len(req.AuthAttributes), len(req.StorageJSON))
-	if key == "" {
-		return nil, classEnvelope(&errclass.Error{Class: errclass.ClassAuth, Message: "selected auth has no api key"})
+	key, source, keyErr := selectedCredentialAPIKey(req)
+	if keyErr != nil {
+		message := keyErr.Error()
+		if errors.Is(keyErr, errSelectedCredentialNoAPIKey) {
+			message = "selected auth has no api key"
+		}
+		debugTrace("executor auth model=%s auth_id=%s provider=%s key_source=%s key_error=%v", req.Model, req.AuthID, req.AuthProvider, source, keyErr)
+		return nil, classEnvelope(&errclass.Error{Class: errclass.ClassAuth, Message: message})
 	}
+	debugTrace("executor auth model=%s auth_id=%s provider=%s key_source=%s attr_count=%d storage_json_bytes=%d", req.Model, req.AuthID, req.AuthProvider, source, len(req.AuthAttributes), len(req.StorageJSON))
 	var rec catalog.ModelRecord
 	var found bool
 	if mgr != nil && req.Model != "" {

@@ -429,7 +429,7 @@ func TestRegisterSuccessPublishesModels(t *testing.T) {
 		len(reg.Metadata.ConfigFields) != 10 {
 		t.Fatalf("metadata wrong: %+v", reg.Metadata)
 	}
-	if !reg.Capabilities.ModelProvider || !reg.Capabilities.AuthProvider {
+	if !reg.Capabilities.ModelProvider || reg.Capabilities.AuthProvider {
 		t.Fatalf("capabilities wrong: %+v", reg.Capabilities)
 	}
 

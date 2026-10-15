@@ -433,7 +433,7 @@ func TestRegisterAndDiscover(t *testing.T) {
 	if reg.SchemaVersion != pluginabi.SchemaVersion {
 		t.Fatalf("schema_version = %d, want %d", reg.SchemaVersion, pluginabi.SchemaVersion)
 	}
-	if !reg.Capabilities.ModelProvider || !reg.Capabilities.AuthProvider || !reg.Capabilities.Executor {
+	if !reg.Capabilities.ModelProvider || reg.Capabilities.AuthProvider || !reg.Capabilities.Executor {
 		t.Fatalf("capabilities = %+v", reg.Capabilities)
 	}
 

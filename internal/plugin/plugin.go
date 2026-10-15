@@ -236,7 +236,7 @@ func registrationEnvelope() []byte {
 		},
 		Capabilities: capabilities{
 			ModelProvider:         true,
-			AuthProvider:          true,
+			AuthProvider:          false,
 			Executor:              true,
 			ExecutorModelScope:    pluginapi.ExecutorModelScopeOAuth,
 			ExecutorInputFormats:  formats,

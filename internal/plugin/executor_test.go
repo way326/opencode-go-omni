@@ -1305,7 +1305,7 @@ func TestRegistrationCapabilitiesIncludeExecutor(t *testing.T) {
 	var reg registrationResult
 	decodeResult(t, resp, &reg)
 	want := []string{"openai", "claude", "openai-response", "gemini"}
-	if !reg.Capabilities.Executor || !reg.Capabilities.AuthProvider ||
+	if !reg.Capabilities.Executor || reg.Capabilities.AuthProvider ||
 		!reflectDeepEqualStrings(reg.Capabilities.ExecutorInputFormats, want) ||
 		!reflectDeepEqualStrings(reg.Capabilities.ExecutorOutputFormats, want) {
 		t.Fatalf("capabilities = %+v", reg.Capabilities)

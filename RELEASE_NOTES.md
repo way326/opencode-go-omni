@@ -1,5 +1,12 @@
 ## What's Changed
 
+### Local development: API-key authentication without a false OAuth entry
+
+- Stop advertising the combined `AuthProvider` capability that made CPA v8.0.28 offer an unsupported browser login and return HTTP 500. OpenCode Go remains an API-key provider; refresh the management page after installing the fix.
+- Keep plugin-generated `type: opencode-go` credentials in CPA's scheduling pool. Read the selected key from attributes, metadata, or persisted JSON, without falling back to another configured key.
+- Preserve the 0.2.1-dev response model metadata fix and all four protocol routes. Legacy manual files with only `provider` and no `type` require an explicit migration before replacement.
+- These are local source changes with offline acceptance; installation and live management-page verification remain separate steps.
+
 Full OpenAI Codex CLI support across all models: multi-agent namespaces, custom programmatic tools (`exec`), tool call results, and reasoning efforts are fully functional.
 
 ### Bug Fixes
