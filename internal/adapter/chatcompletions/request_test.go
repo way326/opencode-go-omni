@@ -567,6 +567,79 @@ func TestBuildRequestResponses(t *testing.T) {
 	}
 }
 
+func TestResponsesReasoningContentRoundTripsOnlyForDeepSeek(t *testing.T) {
+	body := `{"input":[
+		{"type":"reasoning","content":[{"type":"reasoning_text","text":"先查天气。"}]},
+		{"type":"reasoning","summary":[{"type":"summary_text","text":"再整理结果。"}]},
+		{"type":"function_call","call_id":"call_weather","name":"weather","arguments":"{\"city\":\"上海\"}"},
+		{"type":"function_call","call_id":"call_time","name":"time","arguments":"{}"},
+		{"type":"function_call_output","call_id":"call_weather","output":"晴"},
+		{"type":"function_call_output","call_id":"call_time","output":"10:00"}
+	]}`
+	out, eErr := BuildRequest("deepseek-v4.1-flash", "openai-response", []byte(body), nil)
+	m := decodeOut(t, out, eErr)
+	msgs := m["messages"].([]any)
+	if len(msgs) != 3 {
+		t.Fatalf("want assistant tool-call message plus two tool results, got %v", msgs)
+	}
+	asst := msgs[0].(map[string]any)
+	if asst["role"] != "assistant" || asst["reasoning_content"] != "先查天气。再整理结果。" {
+		t.Fatalf("reasoning was not concatenated onto assistant tool call: %v", asst)
+	}
+	calls := asst["tool_calls"].([]any)
+	if len(calls) != 2 || calls[0].(map[string]any)["id"] != "call_weather" || calls[1].(map[string]any)["id"] != "call_time" {
+		t.Fatalf("tool calls changed: %v", calls)
+	}
+	for i, wantID := range []string{"call_weather", "call_time"} {
+		tool := msgs[i+1].(map[string]any)
+		if tool["role"] != "tool" || tool["tool_call_id"] != wantID {
+			t.Fatalf("tool result %d lost association: %v", i, tool)
+		}
+	}
+
+	// A following Response built for a different upstream family must not
+	// forward DeepSeek's provider-specific extension.
+	nonDeepSeek, nonErr := BuildRequest("glm-5.2", "openai-response", []byte(body), nil)
+	nonMap := decodeOut(t, nonDeepSeek, nonErr)
+	first := nonMap["messages"].([]any)[0].(map[string]any)
+	if _, ok := first["reasoning_content"]; ok {
+		t.Fatalf("reasoning_content leaked to a non-DeepSeek model: %v", first)
+	}
+}
+
+func TestResponsesEncryptedReasoningIsNotForwardedAsPlainText(t *testing.T) {
+	body := `{"input":[{"type":"reasoning","encrypted_content":"opaque-secret"},{"type":"function_call","call_id":"c1","name":"f","arguments":"{}"}]}`
+	out, eErr := BuildRequest("opencode-go/deepseek-v4.1-flash", "openai-response", []byte(body), nil)
+	m := decodeOut(t, out, eErr)
+	asst := m["messages"].([]any)[0].(map[string]any)
+	if _, ok := asst["reasoning_content"]; ok {
+		t.Fatalf("encrypted reasoning was fabricated as plain text: %v", asst)
+	}
+}
+
+func TestResponsesReasoningMessageAndToolCallRecombine(t *testing.T) {
+	body := `{"input":[
+		{"type":"reasoning","summary":[{"type":"summary_text","text":"先判断，再调用工具。"}]},
+		{"type":"message","role":"assistant","content":[{"type":"output_text","text":"正在查询。"}]},
+		{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{}"},
+		{"type":"function_call_output","call_id":"call_1","output":"结果"}
+	]}`
+	out, eErr := BuildRequest("deepseek-v4.1-flash", "openai-response", []byte(body), nil)
+	m := decodeOut(t, out, eErr)
+	msgs := m["messages"].([]any)
+	if len(msgs) != 2 {
+		t.Fatalf("reasoning, assistant text and call should form one assistant message plus tool result: %v", msgs)
+	}
+	asst := msgs[0].(map[string]any)
+	if asst["role"] != "assistant" || asst["reasoning_content"] != "先判断，再调用工具。" || asst["content"] != "正在查询。" {
+		t.Fatalf("assistant message did not preserve reasoning and text: %v", asst)
+	}
+	calls := asst["tool_calls"].([]any)
+	if len(calls) != 1 || calls[0].(map[string]any)["id"] != "call_1" {
+		t.Fatalf("assistant tool call not reattached: %v", calls)
+	}
+}
+
 func TestFromResponsesRequest_FunctionCallOutputArray(t *testing.T) {
 	body := `{
 		"model":"opencode-go/glm-5.2",
@@ -585,7 +658,6 @@ func TestFromResponsesRequest_FunctionCallOutputArray(t *testing.T) {
 		t.Fatalf("function_call_output wrong: %v", outMsg)
 	}
 }
-
 
 func TestBuildRequestResponsesVariants(t *testing.T) {
 	t.Run("empty string input yields no messages", func(t *testing.T) {
@@ -1010,4 +1082,3 @@ func TestResponsesReasoningEffortPassthroughWithoutValidation(t *testing.T) {
 		t.Fatalf("reasoning_effort = %v, want xhigh", m["reasoning_effort"])
 	}
 }
-

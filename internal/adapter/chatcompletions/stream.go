@@ -25,45 +25,50 @@ type StreamConverter struct {
 	lineBuf      []byte // partial SSE line carried across Feed calls
 	done         bool
 
-	started      bool // message_start / first chunk seen
-	id           string
-	model        string
-	claudeEm     shared.ClaudeEventEmitter // canonical Messages frames bound to first-chunk identity
-	textOpen     bool                      // claude text content_block open
-	textIndex    int                       // claude index of the currently-open text block
-	nextIndex    int                       // next output/block index
-	msgIndex     int                       // announced assistant message item index (-1 until text)
-	tools        map[int64]*streamTool
-	toolOrder    []int64 // upstream tool_call indices in first-arrival order
-	toolsSeen    bool    // any tool_calls entry observed (terminal-reason precedence)
-	usage        *ccUsage
-	finished     bool            // finish_reason processed
-	heldFinish   string          // finish_reason awaiting terminal emission (flushed on the next data line or [DONE], so the standard include_usage trailer lands in the terminal event; Flush covers close-without-[DONE])
-	terminalSent bool            // claudeTerminal already emitted message_delta (Flush must still close with message_stop)
-	flushed      bool            // Flush already ran (one-shot guard)
-	respText     strings.Builder // openai-response accumulated output_text
-	respTools    *shared.ResponseTools
+	started        bool // message_start / first chunk seen
+	id             string
+	model          string
+	claudeEm       shared.ClaudeEventEmitter // canonical Messages frames bound to first-chunk identity
+	textOpen       bool                      // claude text content_block open
+	textIndex      int                       // claude index of the currently-open text block
+	nextIndex      int                       // next output/block index
+	msgIndex       int                       // announced assistant message item index (-1 until text)
+	reasoningIndex int                       // announced reasoning item index (-1 until reasoning)
+	reasoningID    string
+	reasoningSeen  bool
+	tools          map[int64]*streamTool
+	toolOrder      []int64 // upstream tool_call indices in first-arrival order
+	toolsSeen      bool    // any tool_calls entry observed (terminal-reason precedence)
+	usage          *ccUsage
+	finished       bool            // finish_reason processed
+	heldFinish     string          // finish_reason awaiting terminal emission (flushed on the next data line or [DONE], so the standard include_usage trailer lands in the terminal event; Flush covers close-without-[DONE])
+	terminalSent   bool            // claudeTerminal already emitted message_delta (Flush must still close with message_stop)
+	flushed        bool            // Flush already ran (one-shot guard)
+	respText       strings.Builder // openai-response accumulated output_text
+	reasoningText  strings.Builder
+	respTools      *shared.ResponseTools
 }
 
 // streamTool accumulates one upstream tool_calls index; args collects
 // argument fragments so the terminal response.completed output carries the
 // complete call (FR-006).
 type streamTool struct {
-	blockIndex int
-	id         string
-	name       string
-	args       strings.Builder
-	stopped    bool // content_block_stop emitted
-	customEmitted int // custom_tool_call_input bytes already emitted as deltas
+	blockIndex    int
+	id            string
+	name          string
+	args          strings.Builder
+	stopped       bool // content_block_stop emitted
+	customEmitted int  // custom_tool_call_input bytes already emitted as deltas
 }
 
 // NewStreamConverter returns a converter translating Chat Completions
 // SSE into sourceFormat's stream shape.
 func NewStreamConverter(sourceFormat string, tools ...*shared.ResponseTools) *StreamConverter {
 	sc := &StreamConverter{
-		sourceFormat: sourceFormat,
-		msgIndex:     -1,
-		tools:        map[int64]*streamTool{},
+		sourceFormat:   sourceFormat,
+		msgIndex:       -1,
+		reasoningIndex: -1,
+		tools:          map[int64]*streamTool{},
 	}
 	if len(tools) > 0 && tools[0] != nil {
 		sc.respTools = tools[0]
@@ -190,8 +195,9 @@ type ccToolCallDelta struct {
 }
 
 type ccDelta struct {
-	Content   string            `json:"content"`
-	ToolCalls []ccToolCallDelta `json:"tool_calls"`
+	Content          string            `json:"content"`
+	ReasoningContent string            `json:"reasoning_content"`
+	ToolCalls        []ccToolCallDelta `json:"tool_calls"`
 }
 
 type ccChunkChoice struct {
@@ -450,6 +456,21 @@ func (sc *StreamConverter) responsesLine(line string) ([][]byte, *errclass.Error
 		return events, nil
 	}
 	choice := chunk.Choices[0]
+	if isDeepSeekModel(sc.model) && choice.Delta.ReasoningContent != "" {
+		if sc.reasoningIndex < 0 {
+			sc.reasoningIndex = sc.nextIndex
+			sc.nextIndex++
+			sc.reasoningID = reasoningItemID(sc.id)
+			sc.reasoningSeen = true
+			events = append(events, sc.responsesEm().ItemAdded(sc.reasoningIndex, map[string]any{
+				"type": "reasoning", "id": sc.reasoningID, "summary": []any{},
+			}))
+			events = append(events, sc.responsesEm().ReasoningSummaryPartAdded(sc.reasoningID, sc.reasoningIndex))
+		}
+		sc.reasoningText.WriteString(choice.Delta.ReasoningContent)
+		events = append(events, sc.responsesEm().ReasoningSummaryTextDelta(
+			sc.reasoningID, sc.reasoningIndex, choice.Delta.ReasoningContent))
+	}
 	if choice.Delta.Content != "" {
 		if sc.msgIndex < 0 {
 			sc.msgIndex = sc.nextIndex
@@ -518,25 +539,24 @@ func (sc *StreamConverter) responsesTerminal() [][]byte {
 	// else completed. Tool calls are represented by output items, not
 	// status vocabulary (F-R2, Messages-route parity).
 	status := shared.ResponseStatusFromCCFinish(finish)
-	// Shared assembler (FR-006 sibling parity): the terminal payload
-	// carries the output items fed in ARRIVAL order so Render() reproduces
-	// the streamed output_item.added indexes exactly — the message slot is
-	// pinned at sc.msgIndex (assigned at the first text delta, after any
-	// tools-first announcements), never displacing already-announced
-	// function_call items; this mirrors the Messages-route invariant that
-	// terminal output order equals announcement order (W4 pin).
+	// Shared assembler: add each announced output item in its assigned index
+	// order so response.completed.output matches the streaming announcements.
 	oa := shared.NewOutputAssembler(sc.id, sc.respTools)
-	reserved := false
+	toolsByIndex := make(map[int]*streamTool, len(sc.toolOrder))
 	for _, idx := range sc.toolOrder {
 		t := sc.tools[idx]
-		if sc.msgIndex >= 0 && !reserved && t.blockIndex > sc.msgIndex {
-			oa.ReserveTextSlot()
-			reserved = true
-		}
-		oa.AppendFunctionCall(t.id, t.name, shared.DefaultArgs(t.args.String()))
+		toolsByIndex[t.blockIndex] = t
 	}
-	if sc.msgIndex >= 0 && !reserved {
-		oa.ReserveTextSlot()
+	for outputIndex := 0; outputIndex < sc.nextIndex; outputIndex++ {
+		switch {
+		case sc.reasoningIndex == outputIndex:
+			oa.AppendReasoning(sc.reasoningID, sc.reasoningText.String())
+		case sc.msgIndex == outputIndex:
+			oa.ReserveTextSlot()
+		case toolsByIndex[outputIndex] != nil:
+			t := toolsByIndex[outputIndex]
+			oa.AppendFunctionCall(t.id, t.name, shared.DefaultArgs(t.args.String()))
+		}
 	}
 	oa.AddText(sc.respText.String())
 	// Always attach (F-R6): zero-valued fields when upstream sent none.
@@ -569,6 +589,16 @@ func (sc *StreamConverter) responsesTerminal() [][]byte {
 			events = append(events, em.TextDone(v.ID, idx, text))
 			events = append(events, em.ContentPartDone(v.ID, idx, text))
 			events = append(events, em.ItemDone(idx, v))
+		case "reasoning":
+			text := ""
+			if len(v.Summary) > 0 {
+				text = v.Summary[0].Text
+			}
+			events = append(events,
+				em.ReasoningSummaryTextDone(v.ID, idx, text),
+				em.ReasoningSummaryPartDone(v.ID, idx, text),
+				em.ItemDone(idx, v),
+			)
 		case "function_call":
 			events = append(events, em.ArgsDone(v.CallID, idx, v.Name, v.Arguments))
 			events = append(events, em.ItemDone(idx, v))

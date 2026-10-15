@@ -263,6 +263,92 @@ func TestConvertNonStreamResponses(t *testing.T) {
 	}
 }
 
+func TestConvertNonStreamResponsesDeepSeekReasoning(t *testing.T) {
+	body := `{"id":"resp_1","model":"deepseek-v4.1-flash","choices":[{"finish_reason":"tool_calls","message":{"reasoning_content":"先调用天气工具。","tool_calls":[{"id":"call_weather","type":"function","function":{"name":"weather","arguments":"{}"}}]}}],"usage":{"prompt_tokens":4,"completion_tokens":3,"completion_tokens_details":{"reasoning_tokens":2}}}`
+	m := mustConvert(t, "openai-response", body)
+	output := m["output"].([]any)
+	if len(output) != 2 {
+		t.Fatalf("want reasoning and function_call output items: %v", output)
+	}
+	reasoning := output[0].(map[string]any)
+	if reasoning["type"] != "reasoning" || reasoning["id"] != "rs_resp_1" {
+		t.Fatalf("reasoning item identity/type wrong: %v", reasoning)
+	}
+	summary := reasoning["summary"].([]any)
+	if len(summary) != 1 {
+		t.Fatalf("reasoning summary shape wrong: %v", reasoning)
+	}
+	part := summary[0].(map[string]any)
+	if part["type"] != "summary_text" || part["text"] != "先调用天气工具。" {
+		t.Fatalf("reasoning summary text lost: %v", part)
+	}
+	call := output[1].(map[string]any)
+	if call["type"] != "function_call" || call["call_id"] != "call_weather" {
+		t.Fatalf("tool call item lost: %v", call)
+	}
+	usage := m["usage"].(map[string]any)
+	if usage["output_tokens_details"].(map[string]any)["reasoning_tokens"] != float64(2) {
+		t.Fatalf("reasoning token usage changed: %v", usage)
+	}
+
+	nonDeepSeek := mustConvert(t, "openai-response",
+		`{"model":"glm-5.2","choices":[{"message":{"reasoning_content":"provider extension"}}]}`)
+	if output := nonDeepSeek["output"].([]any); len(output) != 0 {
+		t.Fatalf("non-DeepSeek reasoning_content should be ignored: %v", output)
+	}
+}
+
+func TestDeepSeekReasoningToolRoundTripAcrossResponsesTurns(t *testing.T) {
+	firstTurn := `{"input":"上海天气如何？","tools":[{"type":"function","name":"weather","parameters":{"type":"object"}}]}`
+	firstChat, eErr := BuildRequest("deepseek-v4.1-flash", "openai-response", []byte(firstTurn), nil)
+	if eErr != nil {
+		t.Fatalf("first Responses-to-Chat request failed: %v", eErr)
+	}
+	firstReq := decodeOut(t, firstChat, nil)
+	if firstReq["messages"].([]any)[0].(map[string]any)["content"] != "上海天气如何？" {
+		t.Fatalf("initial user input missing: %v", firstReq["messages"])
+	}
+
+	upstream := `{"id":"resp_tool","model":"deepseek-v4.1-flash","choices":[{"finish_reason":"tool_calls","message":{"reasoning_content":"先查询上海天气。","tool_calls":[{"id":"call_weather","type":"function","function":{"name":"weather","arguments":"{\"city\":\"上海\"}"}}]}}]}`
+	responsesBytes, eErr := ConvertNonStreamResponse("openai-response", 200, []byte(upstream))
+	if eErr != nil {
+		t.Fatalf("Chat-to-Responses conversion failed: %v", eErr)
+	}
+	var responses map[string]any
+	if err := json.Unmarshal(responsesBytes, &responses); err != nil {
+		t.Fatalf("decode synthesized Responses: %v", err)
+	}
+	items := responses["output"].([]any)
+	items = append(items, map[string]any{
+		"type": "function_call_output", "call_id": "call_weather", "output": "上海晴，22°C",
+	})
+	secondTurn, err := json.Marshal(map[string]any{"input": items})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondChat, eErr := BuildRequest("deepseek-v4.1-flash", "openai-response", secondTurn, nil)
+	if eErr != nil {
+		t.Fatalf("second Responses-to-Chat request failed: %v", eErr)
+	}
+	secondReq := decodeOut(t, secondChat, nil)
+	messages := secondReq["messages"].([]any)
+	if len(messages) != 2 {
+		t.Fatalf("second turn should contain assistant call and tool result: %v", messages)
+	}
+	assistant := messages[0].(map[string]any)
+	if assistant["role"] != "assistant" || assistant["reasoning_content"] != "先查询上海天气。" {
+		t.Fatalf("assistant reasoning was not returned to the upstream: %v", assistant)
+	}
+	calls := assistant["tool_calls"].([]any)
+	if len(calls) != 1 || calls[0].(map[string]any)["id"] != "call_weather" {
+		t.Fatalf("assistant tool call was not retained: %v", calls)
+	}
+	tool := messages[1].(map[string]any)
+	if tool["role"] != "tool" || tool["tool_call_id"] != "call_weather" || tool["content"] != "上海晴，22°C" {
+		t.Fatalf("function_call_output did not pair with call: %v", tool)
+	}
+}
+
 func TestConvertNonStreamResponsesVariants(t *testing.T) {
 	t.Run("length maps to incomplete", func(t *testing.T) {
 		m := mustConvert(t, "openai-response",

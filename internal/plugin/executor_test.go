@@ -421,6 +421,118 @@ func TestExecuteChatRoute(t *testing.T) {
 	}
 }
 
+func TestExecuteDeepSeekResponsesToolTurnReturnsReasoningToChatUpstream(t *testing.T) {
+	const catalogBody = `{"data":[{"id":"deepseek-v4.1-flash"}]}`
+	responses := []string{
+		`{"id":"resp_tool","model":"deepseek-v4.1-flash","choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","content":"正在查询。","reasoning_content":"先查询上海天气。","tool_calls":[{"id":"call_weather","type":"function","function":{"name":"weather","arguments":"{\"city\":\"上海\"}"}}]}}],"usage":{"prompt_tokens":10,"completion_tokens":8,"completion_tokens_details":{"reasoning_tokens":4}}}`,
+		`{"id":"resp_final","model":"deepseek-v4.1-flash","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"上海晴，22°C。","reasoning_content":"根据工具结果整理答案。"}}]}`,
+	}
+	responseIndex := 0
+	f := &fakeCaller{responder: wrapWithCatalog(catalogBody, func(method string, payload []byte) ([]byte, error) {
+		if method != pluginabi.MethodHostHTTPDo {
+			return hostOK(map[string]any{}), nil
+		}
+		var wire map[string]any
+		if err := json.Unmarshal(payload, &wire); err != nil {
+			return hostErr("test", "malformed bridged request"), nil
+		}
+		url, _ := wire["url"].(string)
+		if strings.HasSuffix(url, "/models") {
+			return hostOK(pluginapi.HTTPResponse{StatusCode: http.StatusOK, Body: []byte(catalogBody)}), nil
+		}
+		if !strings.HasSuffix(url, "/v1/chat/completions") {
+			return hostErr("test", "unexpected upstream endpoint"), nil
+		}
+		if responseIndex >= len(responses) {
+			return hostErr("test", "unexpected extra chat request"), nil
+		}
+		body := responses[responseIndex]
+		responseIndex++
+		return hostOK(pluginapi.HTTPResponse{
+			StatusCode: http.StatusOK,
+			Headers:    http.Header{"Content-Type": []string{"application/json"}},
+			Body:       []byte(body),
+		}), nil
+	})}
+	m := NewManager(NewHostBridge(f.call))
+	t.Cleanup(func() { _, _ = m.HandleCall("plugin.shutdown", nil) })
+	if _, err := m.HandleCall("plugin.register", lifecycleRequestBody(testValidYAML)); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	firstInput := []byte(`{"input":"上海天气如何？","tools":[{"type":"function","name":"weather","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}]}`)
+	firstEnv := decodeEnv(t, mustHandle(t, m, "executor.execute", execReqBody("opencode-go/deepseek-v4.1-flash", "openai-response", firstInput, false)))
+	if !firstEnv.OK {
+		t.Fatalf("first turn failed: %+v", firstEnv.Error)
+	}
+	var firstResult pluginapi.ExecutorResponse
+	if err := json.Unmarshal(firstEnv.Result, &firstResult); err != nil {
+		t.Fatalf("decode first result: %v", err)
+	}
+	var firstResponse map[string]any
+	if err := json.Unmarshal(firstResult.Payload, &firstResponse); err != nil {
+		t.Fatalf("decode first Responses result: %v", err)
+	}
+	output := firstResponse["output"].([]any)
+	if len(output) != 3 {
+		t.Fatalf("first Responses result must retain reasoning, message and function_call: %v", output)
+	}
+	if output[0].(map[string]any)["type"] != "reasoning" || output[2].(map[string]any)["type"] != "function_call" {
+		t.Fatalf("first Responses output ordering/items changed: %v", output)
+	}
+
+	firstWire := lastWire(t, f, pluginabi.MethodHostHTTPDo)
+	if !strings.HasSuffix(firstWire["url"].(string), "/v1/chat/completions") {
+		t.Fatalf("first upstream endpoint = %v", firstWire["url"])
+	}
+	firstChat := map[string]any{}
+	if err := json.Unmarshal(wireBody(t, firstWire, "body"), &firstChat); err != nil {
+		t.Fatalf("decode first upstream Chat request: %v", err)
+	}
+	if firstChat["model"] != "deepseek-v4.1-flash" {
+		t.Fatalf("first upstream model = %v", firstChat["model"])
+	}
+
+	output = append(output, map[string]any{
+		"type": "function_call_output", "call_id": "call_weather", "output": "上海晴，22°C",
+	})
+	secondInput, err := json.Marshal(map[string]any{
+		"input": output,
+		"tools": []any{map[string]any{"type": "function", "name": "weather", "parameters": map[string]any{"type": "object"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondEnv := decodeEnv(t, mustHandle(t, m, "executor.execute", execReqBody("opencode-go/deepseek-v4.1-flash", "openai-response", secondInput, false)))
+	if !secondEnv.OK {
+		t.Fatalf("second turn failed: %+v", secondEnv.Error)
+	}
+	secondWire := lastWire(t, f, pluginabi.MethodHostHTTPDo)
+	secondChat := map[string]any{}
+	if err := json.Unmarshal(wireBody(t, secondWire, "body"), &secondChat); err != nil {
+		t.Fatalf("decode second upstream Chat request: %v", err)
+	}
+	messages := secondChat["messages"].([]any)
+	if len(messages) != 2 {
+		t.Fatalf("second Chat request should have assistant call and tool result: %v", messages)
+	}
+	assistant := messages[0].(map[string]any)
+	if assistant["role"] != "assistant" || assistant["reasoning_content"] != "先查询上海天气。" || assistant["content"] != "正在查询。" {
+		t.Fatalf("actual second Chat request lost reasoning or assistant text: %v", assistant)
+	}
+	calls := assistant["tool_calls"].([]any)
+	if len(calls) != 1 || calls[0].(map[string]any)["id"] != "call_weather" {
+		t.Fatalf("actual second Chat request lost tool call: %v", calls)
+	}
+	tool := messages[1].(map[string]any)
+	if tool["role"] != "tool" || tool["tool_call_id"] != "call_weather" || tool["content"] != "上海晴，22°C" {
+		t.Fatalf("actual second Chat request lost matching tool result: %v", tool)
+	}
+	if responseIndex != 2 {
+		t.Fatalf("served %d upstream responses, want 2", responseIndex)
+	}
+}
+
 func TestExecuteUnknownModelIs404Envelope(t *testing.T) {
 	m, _ := newExecManager(t)
 	env := mustExecute(t, m, "opencode-go/nope", "openai", []byte(ccRequestBody))

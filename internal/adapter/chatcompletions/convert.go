@@ -11,8 +11,9 @@ import (
 // ---- upstream Chat Completions response shapes (FR-006) ----
 
 type ccRespMessage struct {
-	Content   json.RawMessage     `json:"content"` // JSON string or part array
-	ToolCalls []shared.CCToolCall `json:"tool_calls"`
+	Content          json.RawMessage     `json:"content"` // JSON string or part array
+	ReasoningContent string              `json:"reasoning_content"`
+	ToolCalls        []shared.CCToolCall `json:"tool_calls"`
 }
 
 type ccChoice struct {
@@ -178,9 +179,12 @@ func chatToResponses(body []byte, tools ...*shared.ResponseTools) ([]byte, *errc
 		return nil, eErr
 	}
 	// The shared assembler gives Chat Completions placement (no reserved
-	// slot): the message leads and appears only when text is non-empty,
-	// matching the streaming terminal (FR-006 sibling parity).
+	// slot): readable reasoning leads when present; otherwise a non-empty
+	// assistant message leads, matching the streaming terminal.
 	oa := shared.NewOutputAssembler(resp.ID, tools...)
+	if isDeepSeekModel(resp.Model) {
+		oa.AppendReasoning(reasoningItemID(resp.ID), choice.Message.ReasoningContent)
+	}
 	for _, b := range blocks {
 		if b["type"] != "text" {
 			return nil, errclass.Translation(fmt.Sprintf(

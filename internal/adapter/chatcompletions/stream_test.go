@@ -1145,6 +1145,75 @@ func TestStreamResponses_ItemDoneEvents(t *testing.T) {
 	}
 }
 
+func TestStreamResponsesDeepSeekReasoningAndToolCall(t *testing.T) {
+	sc := NewStreamConverter("openai-response")
+	evs := feedAll(t, sc,
+		`data: {"id":"resp_ds","model":"deepseek-v4.1-flash","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"先查询。"}}]}`,
+		`data: {"choices":[{"index":0,"delta":{"reasoning_content":"再回答。"}}]}`,
+		`data: {"choices":[{"index":0,"delta":{"content":"天气晴朗。"}}]}`,
+		`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_weather","type":"function","function":{"name":"weather","arguments":"{}"}}]}}]}`,
+		`data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":5,"completion_tokens":6,"completion_tokens_details":{"reasoning_tokens":3}}}`,
+		`data: [DONE]`)
+
+	var announced []string
+	var completed map[string]any
+	seenReasoningDelta := ""
+	var terminal []string
+	for _, ev := range evs {
+		switch ev.Name {
+		case "response.output_item.added":
+			item := ev.Data["item"].(map[string]any)
+			announced = append(announced, item["type"].(string))
+		case "response.reasoning_summary_text.delta":
+			seenReasoningDelta += ev.Data["delta"].(string)
+			if ev.Data["item_id"] != "rs_resp_ds" || ev.Data["output_index"] != float64(0) {
+				t.Fatalf("reasoning delta identity/index wrong: %v", ev)
+			}
+		case "response.reasoning_summary_text.done":
+			terminal = append(terminal, ev.Name)
+			if ev.Data["text"] != "先查询。再回答。" || ev.Data["output_index"] != float64(0) {
+				t.Fatalf("reasoning text done wrong: %v", ev)
+			}
+		case "response.reasoning_summary_part.done", "response.output_item.done":
+			terminal = append(terminal, ev.Name)
+		case "response.completed":
+			completed = ev.Data["response"].(map[string]any)
+		}
+	}
+	if got := strings.Join(announced, ","); got != "reasoning,message,function_call" {
+		t.Fatalf("output item announcement order = %q", got)
+	}
+	if seenReasoningDelta != "先查询。再回答。" {
+		t.Fatalf("reasoning deltas concatenated to %q", seenReasoningDelta)
+	}
+	if completed == nil {
+		t.Fatalf("missing response.completed: %v", evs)
+	}
+	output := completed["output"].([]any)
+	if len(output) != 3 {
+		t.Fatalf("completed output items = %v", output)
+	}
+	reasoning := output[0].(map[string]any)
+	if reasoning["type"] != "reasoning" || reasoning["summary"].([]any)[0].(map[string]any)["text"] != "先查询。再回答。" {
+		t.Fatalf("completed reasoning differs from streamed deltas: %v", reasoning)
+	}
+	message := output[1].(map[string]any)
+	if message["type"] != "message" || message["content"].([]any)[0].(map[string]any)["text"] != "天气晴朗。" {
+		t.Fatalf("completed message wrong: %v", message)
+	}
+	call := output[2].(map[string]any)
+	if call["type"] != "function_call" || call["call_id"] != "call_weather" || call["arguments"] != "{}" {
+		t.Fatalf("completed tool call wrong: %v", call)
+	}
+	usage := completed["usage"].(map[string]any)
+	if usage["output_tokens_details"].(map[string]any)["reasoning_tokens"] != float64(3) {
+		t.Fatalf("reasoning usage was lost: %v", usage)
+	}
+	if strings.Join(terminal, ",") != "response.reasoning_summary_text.done,response.reasoning_summary_part.done,response.output_item.done,response.output_item.done,response.output_item.done" {
+		t.Fatalf("reasoning and output item completion events wrong: %v", terminal)
+	}
+}
+
 func TestStreamResponsesCustomToolCallRestored(t *testing.T) {
 	rt := shared.NewResponseTools()
 	reqBody := `{"input":"hi","tools":[{"type":"custom","name":"exec"}]}`

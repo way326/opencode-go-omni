@@ -479,7 +479,6 @@ func RespOutputText(raw json.RawMessage, targetNoun string) (string, *errclass.E
 	return b.String(), nil
 }
 
-
 // ClaudeImageURL converts an Anthropic image block source into an image
 // URL for OpenAI-style targets, encoding base64 sources as data URLs
 // (FR-005 multimodal preservation). Strict validation shared by every
@@ -701,6 +700,41 @@ func (e ResponsesEventEmitter) ItemAdded(outputIndex int, item map[string]any) [
 func (e ResponsesEventEmitter) TextDelta(itemID string, outputIndex int, delta string) []byte {
 	return SSEEvent("response.output_text.delta", map[string]any{
 		"type": "response.output_text.delta", "item_id": itemID, "output_index": outputIndex, "delta": delta,
+	})
+}
+
+// ReasoningSummaryPartAdded announces the summary part that carries the
+// readable reasoning text.
+func (e ResponsesEventEmitter) ReasoningSummaryPartAdded(itemID string, outputIndex int) []byte {
+	return SSEEvent("response.reasoning_summary_part.added", map[string]any{
+		"type": "response.reasoning_summary_part.added", "item_id": itemID,
+		"output_index": outputIndex, "summary_index": 0,
+		"part": map[string]any{"type": "summary_text", "text": ""},
+	})
+}
+
+// ReasoningSummaryTextDelta streams readable reasoning text.
+func (e ResponsesEventEmitter) ReasoningSummaryTextDelta(itemID string, outputIndex int, delta string) []byte {
+	return SSEEvent("response.reasoning_summary_text.delta", map[string]any{
+		"type": "response.reasoning_summary_text.delta", "item_id": itemID,
+		"output_index": outputIndex, "summary_index": 0, "delta": delta,
+	})
+}
+
+// ReasoningSummaryTextDone closes the readable reasoning text.
+func (e ResponsesEventEmitter) ReasoningSummaryTextDone(itemID string, outputIndex int, text string) []byte {
+	return SSEEvent("response.reasoning_summary_text.done", map[string]any{
+		"type": "response.reasoning_summary_text.done", "item_id": itemID,
+		"output_index": outputIndex, "summary_index": 0, "text": text,
+	})
+}
+
+// ReasoningSummaryPartDone closes the reasoning summary part.
+func (e ResponsesEventEmitter) ReasoningSummaryPartDone(itemID string, outputIndex int, text string) []byte {
+	return SSEEvent("response.reasoning_summary_part.done", map[string]any{
+		"type": "response.reasoning_summary_part.done", "item_id": itemID,
+		"output_index": outputIndex, "summary_index": 0,
+		"part": map[string]any{"type": "summary_text", "text": text},
 	})
 }
 
@@ -1115,10 +1149,14 @@ type RespItem struct {
 	Arguments string          `json:"arguments,omitempty"`
 	Input     string          `json:"input,omitempty"`
 	Output    json.RawMessage `json:"output,omitempty"`
-	Summary   []struct {
-		Text string `json:"text"`
-	} `json:"summary,omitempty"`
+	Summary   []RespSummary   `json:"summary,omitempty"`
 	Tools     []RespTool      `json:"tools,omitempty"`
+}
+
+// RespSummary is one Responses reasoning summary part.
+type RespSummary struct {
+	Type string `json:"type,omitempty"`
+	Text string `json:"text"`
 }
 
 // CCFunction is one Chat Completions tool function definition (decode and
@@ -1559,17 +1597,17 @@ type outputTextPart struct {
 	Text string `json:"text"`
 }
 
-// OutputAssembler aggregates Responses output items — ONE assistant
-// message item carrying all observed text plus function_call items in
-// arrival order — for every Responses-output synthesis site, streaming and
+// OutputAssembler aggregates Responses output items — readable reasoning
+// items, ONE assistant message carrying all observed text, and function_call
+// items — for every Responses-output synthesis site, streaming and
 // non-streaming, Messages-source and Chat-Completions-source alike
 // (FR-006 mode/route parity). Placement collapses two former per-site
 // mechanics into one rule: a site that called ReserveTextSlot gets the
 // message at the first text observation's slot (filled even when the
 // aggregated text is empty — Messages-source semantics); a site that
-// never reserves gets the Chat Completions placement (message leads, and
-// only when text is non-empty). Render materializes the array once, at
-// terminal time.
+// never reserves gets the Chat Completions placement (the message follows
+// any leading reasoning items and appears only when text is non-empty).
+// Render materializes the array once, at terminal time.
 type OutputAssembler struct {
 	messageID string          // identity carried by the message item
 	items     []any           // rendered items in insertion order
@@ -1621,6 +1659,19 @@ func (a *OutputAssembler) AppendFunctionCall(callID, name, args string) {
 	})
 }
 
+// AppendReasoning adds one synthesized Responses reasoning item at the
+// current output position. Encrypted reasoning is never passed here because
+// it has no text representation.
+func (a *OutputAssembler) AppendReasoning(itemID, text string) {
+	if text == "" {
+		return
+	}
+	a.items = append(a.items, RespItem{
+		Type: "reasoning", ID: itemID,
+		Summary: []RespSummary{{Type: "summary_text", Text: text}},
+	})
+}
+
 // Render fills the reserved slot (or leads with the message for sites
 // that never reserved but observed non-empty text) and returns the
 // output array.
@@ -1632,10 +1683,19 @@ func (a *OutputAssembler) Render() []any {
 		if a.textSlot >= 0 {
 			a.items[a.textSlot] = msg
 		} else {
-			rest := a.items
-			a.items = make([]any, 0, len(rest)+1)
-			a.items = append(a.items, msg)
-			a.items = append(a.items, rest...)
+			// Chat Completions has no item index for reasoning, so the
+			// synthesized message leads ordinary output but follows any
+			// reasoning item that was observed first.
+			insertAt := 0
+			for insertAt < len(a.items) {
+				if item, ok := a.items[insertAt].(RespItem); !ok || item.Type != "reasoning" {
+					break
+				}
+				insertAt++
+			}
+			a.items = append(a.items, nil)
+			copy(a.items[insertAt+1:], a.items[insertAt:])
+			a.items[insertAt] = msg
 		}
 	}
 	return a.items

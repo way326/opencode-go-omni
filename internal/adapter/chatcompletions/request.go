@@ -124,10 +124,11 @@ type ccContentPart struct {
 }
 
 type ccMessage struct {
-	Role       string              `json:"role"`
-	Content    any                 `json:"content"` // string, []ccContentPart, or nil
-	ToolCalls  []shared.CCToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string              `json:"tool_call_id,omitempty"`
+	Role             string              `json:"role"`
+	Content          any                 `json:"content"` // string, []ccContentPart, or nil
+	ReasoningContent string              `json:"reasoning_content,omitempty"`
+	ToolCalls        []shared.CCToolCall `json:"tool_calls,omitempty"`
+	ToolCallID       string              `json:"tool_call_id,omitempty"`
 }
 
 type ccRequest struct {
@@ -340,8 +341,8 @@ func claudeAssistantMessage(m *shared.ClaudeMessageRecord) (*ccMessage, *errclas
 // messages, reasoning.effort maps to reasoning_effort,
 // parallel_tool_calls passes through as-is (the reverse leg forwards the
 // same field), and max_output_tokens maps to max_tokens. Historical
-// reasoning items are omitted (no CC equivalent; FR-005 explicit omission
-// policy).
+// reasoning items are represented as DeepSeek's reasoning_content field when
+// their text is available; encrypted-only reasoning remains omitted.
 func responsesToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSupport, tools *shared.ResponseTools) ([]byte, *errclass.Error) {
 	var src shared.ResponsesRequest
 	if err := json.Unmarshal(body, &src); err != nil {
@@ -380,6 +381,16 @@ func responsesToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSu
 		return nil, eErr
 	}
 	applyToolChoiceCC(out, kind, tcName)
+	pendingReasoning := ""
+	lastAssistantCarriesReasoning := false
+	flushReasoning := func() {
+		if pendingReasoning == "" {
+			return
+		}
+		out.Messages = append(out.Messages, ccMessage{Role: "assistant", ReasoningContent: pendingReasoning})
+		pendingReasoning = ""
+		lastAssistantCarriesReasoning = true
+	}
 	for _, item := range items {
 		switch item.Type {
 		case "message":
@@ -389,6 +400,7 @@ func responsesToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSu
 			}
 			switch item.Role {
 			case "system", "developer":
+				flushReasoning()
 				// Flatten to text; images have no system-message
 				// equivalent and are rejected descriptively (FR-005).
 				text := ""
@@ -405,9 +417,17 @@ func responsesToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSu
 					text = sb.String()
 				}
 				addSystem(text)
-			case "user", "assistant":
+			case "user":
+				flushReasoning()
 				if content != nil {
 					out.Messages = append(out.Messages, ccMessage{Role: item.Role, Content: content})
+				}
+				lastAssistantCarriesReasoning = false
+			case "assistant":
+				if content != nil || pendingReasoning != "" {
+					out.Messages = append(out.Messages, ccMessage{Role: item.Role, Content: content, ReasoningContent: pendingReasoning})
+					lastAssistantCarriesReasoning = pendingReasoning != ""
+					pendingReasoning = ""
 				}
 			default:
 				return nil, shared.ValidateRole(item.Role, EndpointPath)
@@ -424,15 +444,20 @@ func responsesToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSu
 			// assistant message so multi-call turns round-trip.
 			if n := len(out.Messages); n > 0 {
 				last := &out.Messages[n-1]
-				if last.Role == "assistant" && last.Content == nil {
+				if last.Role == "assistant" && (last.Content == nil || lastAssistantCarriesReasoning) {
+					last.ReasoningContent += pendingReasoning
+					pendingReasoning = ""
 					last.ToolCalls = append(last.ToolCalls, tc)
 					continue
 				}
 			}
 			out.Messages = append(out.Messages, ccMessage{
-				Role: "assistant", ToolCalls: []shared.CCToolCall{tc},
+				Role: "assistant", ReasoningContent: pendingReasoning, ToolCalls: []shared.CCToolCall{tc},
 			})
+			lastAssistantCarriesReasoning = pendingReasoning != ""
+			pendingReasoning = ""
 		case "function_call_output", "custom_tool_call_output":
+			flushReasoning()
 			text, eErr := shared.RespOutputText(item.Output, "tool messages carry text only")
 			if eErr != nil {
 				return nil, eErr
@@ -440,12 +465,16 @@ func responsesToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSu
 			out.Messages = append(out.Messages, ccMessage{
 				Role: "tool", Content: text, ToolCallID: item.CallID,
 			})
+			lastAssistantCarriesReasoning = false
 		case "reasoning":
-			// omitted: no Chat Completions equivalent (FR-005 policy)
+			if isDeepSeekModel(upstreamModel) {
+				pendingReasoning += reasoningItemText(item)
+			}
 		default:
 			return nil, shared.UnsupportedInputItemType(item.Type)
 		}
 	}
+	flushReasoning()
 
 	for _, t := range src.Tools {
 		if eErr := shared.FunctionTool(t.Type, EndpointPath); eErr != nil {
@@ -458,6 +487,47 @@ func responsesToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSu
 		})
 	}
 	return encode(out), nil
+}
+
+func isDeepSeekModel(model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	if i := strings.LastIndexByte(model, '/'); i >= 0 {
+		model = model[i+1:]
+	}
+	return strings.HasPrefix(model, "deepseek")
+}
+
+func reasoningItemText(item shared.RespItem) string {
+	var b strings.Builder
+	if len(item.Content) > 0 && string(item.Content) != "null" {
+		var text string
+		if json.Unmarshal(item.Content, &text) == nil {
+			b.WriteString(text)
+		} else {
+			var parts []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			}
+			if json.Unmarshal(item.Content, &parts) == nil {
+				for _, part := range parts {
+					if part.Type == "reasoning_text" || part.Type == "summary_text" || part.Type == "text" {
+						b.WriteString(part.Text)
+					}
+				}
+			}
+		}
+	}
+	for _, part := range item.Summary {
+		b.WriteString(part.Text)
+	}
+	return b.String()
+}
+
+func reasoningItemID(responseID string) string {
+	if responseID == "" {
+		return "rs_reasoning"
+	}
+	return "rs_" + responseID
 }
 
 // respContent normalizes a Responses content field (JSON string or typed
