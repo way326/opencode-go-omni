@@ -46,14 +46,15 @@ type executorRequest struct {
 // resolvedExecution carries everything both execution paths need after
 // model/key resolution succeeded.
 type resolvedExecution struct {
-	cfg        config.Config
-	rec        catalog.ModelRecord
-	key        string
-	tools      shared.ResponseTools
-	original   []byte
-	upstream   []byte
-	model      string
-	callbackID string
+	cfg         config.Config
+	rec         catalog.ModelRecord
+	key         string
+	tools       shared.ResponseTools
+	original    []byte
+	upstream    []byte
+	model       string
+	clientModel string
+	callbackID  string
 }
 
 // Payload contains CPA's effective request, including request rewrites. The
@@ -170,7 +171,7 @@ func (m *Manager) resolveExecution(req executorRequest) (*resolvedExecution, []b
 			StatusCode: http.StatusNotFound,
 		})
 	}
-	return &resolvedExecution{cfg: cfg, rec: rec, key: key, tools: *shared.NewResponseTools(), callbackID: req.HostCallbackID}, nil
+	return &resolvedExecution{cfg: cfg, rec: rec, key: key, tools: *shared.NewResponseTools(), clientModel: req.Model, callbackID: req.HostCallbackID}, nil
 }
 
 // handleExecute implements executor.execute (non-stream). Stream-flagged
@@ -228,7 +229,7 @@ func (m *Manager) handleExecute(request []byte) ([]byte, error) {
 	if eErr != nil {
 		return classEnvelope(eErr), nil
 	}
-	return okEnvelope(pluginapi.ExecutorResponse{Payload: converted, Headers: resp.Headers}), nil
+	return okEnvelope(pluginapi.ExecutorResponse{Payload: clientResponseModel(res, executorResponseFormat(req), converted), Headers: resp.Headers}), nil
 }
 
 func buildUpstreamRequest(route catalog.Route, upstreamModel, sourceFormat string, sourceBody []byte, ts *pluginapi.ThinkingSupport, tools ...*shared.ResponseTools) ([]byte, *errclass.Error) {
@@ -582,6 +583,12 @@ func (m *Manager) pumpStream(downID, upstreamID string, res *resolvedExecution, 
 	defer watchdog.Stop()
 
 	conv := executionStreamConverter(res, sourceFormat)
+	emit := func(events [][]byte) error {
+		for i, event := range events {
+			events[i] = clientResponseModel(res, sourceFormat, event)
+		}
+		return m.emitAll(downID, events)
+	}
 	var (
 		total          int64
 		upstreamClosed bool
@@ -613,7 +620,7 @@ func (m *Manager) pumpStream(downID, upstreamID string, res *resolvedExecution, 
 			closeStreams(errclass.Redact(convErr.Message))
 			return
 		}
-		if emitErr := m.emitAll(downID, events); emitErr != nil {
+		if emitErr := emit(events); emitErr != nil {
 			closeStreams(errclass.Redact(emitErr.Error()))
 			return
 		}
@@ -633,14 +640,14 @@ func (m *Manager) pumpStream(downID, upstreamID string, res *resolvedExecution, 
 			closeStreams(errclass.Redact(finishErr.Message))
 			return
 		}
-		if emitErr := m.emitAll(downID, flushed); emitErr != nil {
+		if emitErr := emit(flushed); emitErr != nil {
 			closeStreams(errclass.Redact(emitErr.Error()))
 			return
 		}
 	} else if !convDone && upstreamClosed {
 		if flusher, ok := conv.(interface{ Flush() [][]byte }); ok {
 			flushed := flusher.Flush()
-			if emitErr := m.emitAll(downID, flushed); emitErr != nil {
+			if emitErr := emit(flushed); emitErr != nil {
 				closeStreams(errclass.Redact(emitErr.Error()))
 				return
 			}

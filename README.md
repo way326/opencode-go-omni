@@ -1,6 +1,8 @@
 # OpenCode Go Unified CPA Plugin
 
-This local fork derives from [massiveits/opencode-go-cliproxyapi](https://github.com/massiveits/opencode-go-cliproxyapi), revision `a4369b9b1cf18a4111a0167e3b50e5d69054fe45` (plugin 0.1.10). Its plugin identity is **`opencode-go-unified`**, version **`0.2.0-dev`**. The upstream MIT license and attribution are retained.
+This local fork derives from [massiveits/opencode-go-cliproxyapi](https://github.com/massiveits/opencode-go-cliproxyapi), revision `a4369b9b1cf18a4111a0167e3b50e5d69054fe45` (plugin 0.1.10). Its plugin identity is **`opencode-go-unified`**, version **`0.2.1-dev`**. The upstream MIT license and attribution are retained.
+
+Version 0.2.1-dev restores the requested public model ID in Chat, Messages, and Responses response metadata, including streaming lifecycle events. An exact match to the upstream target is required; other reported model IDs remain unchanged so clients can still detect a mismatch. Tool payloads, signatures, usage and native Gemini model-version fields are preserved.
 
 The fork adds Google Gemini GenerateContent as a fourth upstream route while retaining the existing Chat Completions, Messages, and Responses adapters. Models discovered from the configured Go subscription catalog share the existing **`opencode-go` provider and credential pool**. Gemini-family models use `/v1/models/{model}:generateContent` or `:streamGenerateContent?alt=sse`. Unknown model families stay visible in diagnostics until an explicit route override supplies their protocol.
 

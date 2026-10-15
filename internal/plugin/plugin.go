@@ -24,7 +24,7 @@ const ProviderID = "opencode-go"
 // pluginName / pluginVersion are reported in registration metadata.
 const (
 	pluginName    = "opencode-go-unified"
-	pluginVersion = "0.2.0-dev"
+	pluginVersion = "0.2.1-dev"
 )
 
 // githubRepoURL satisfies the host's validPlugin gate (host.go

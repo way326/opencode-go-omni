@@ -26,7 +26,7 @@ try {
     $library = Join-Path $dist "opencode-go-unified.dll"
     & $resolvedGo -C $sourceRoot build -trimpath -buildmode=c-shared -ldflags "-s -w" -o $library .
     if ($LASTEXITCODE -ne 0) { throw "Plugin shared-library build failed." }
-    $archive = Join-Path $dist "opencode-go-unified_0.2.0-dev_windows_amd64.zip"
+    $archive = Join-Path $dist "opencode-go-unified_0.2.1-dev_windows_amd64.zip"
     & $resolvedGo -C $sourceRoot run ./.github/scripts/package-release.go -library $library -archive $archive -checksum "$archive.sha256"
     if ($LASTEXITCODE -ne 0) { throw "Packaging failed." }
     Write-Output "Built plugin only: $library"
