@@ -15,10 +15,11 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 
 	"opencode-go-cliproxyapi/internal/config"
 )
@@ -36,7 +37,34 @@ const (
 	RouteChatCompletions Route = "chat-completions"
 	RouteMessages        Route = "messages"
 	RouteResponses       Route = "responses"
+	// RouteGemini is the native Gemini protocol (spec 04 §4): models are
+	// served through /v1/models/<model>:<action>, so a record carries a
+	// model-scoped endpoint instead of one from the static table below. The
+	// value is pinned to config.ProtocolGemini, so the protocols.gemini switch
+	// and this route name cannot drift apart.
+	RouteGemini Route = Route(config.ProtocolGemini)
 )
+
+// The routable Gemini actions come from the config vocabulary (spec 04 §4/§5):
+// a record publishes the non-stream generateContent path, and the executor
+// swaps in the stream action for a streaming request instead of accepting a
+// free-form action here.
+const (
+	geminiActionGenerate = config.GeminiActionGenerate
+	geminiActionStream   = config.GeminiActionStream
+)
+
+// geminiPathReason is the exclusion diagnostic for entries whose resolved
+// Gemini endpoint is not the native shape (arch §5).
+const geminiPathReason = "resolved endpoint is not a native gemini generateContent or streamGenerateContent path"
+
+// geminiPathPattern pins the native Gemini path shape a gemini-route record
+// may carry: /v1/models/<model>:<action>. The model segment is restricted to
+// [A-Za-z0-9._-], so a catalog entry cannot smuggle a second path segment, a
+// query, or an authority rewrite into the upstream URL, and the action is one
+// of the two routable actions built from the config vocabulary.
+var geminiPathPattern = regexp.MustCompile(fmt.Sprintf(`^/v1/models/([A-Za-z0-9._-]+):(%s|%s)$`,
+	regexp.QuoteMeta(geminiActionGenerate), regexp.QuoteMeta(geminiActionStream)))
 
 // EndpointPath returns the upstream endpoint path for the route (FR-004).
 // routeEndpoints maps each route to its upstream endpoint path.
@@ -46,13 +74,32 @@ var routeEndpoints = map[Route]string{
 	RouteResponses:       "/v1/responses",
 }
 
-// EndpointPath returns the route's upstream endpoint path, or "" for
-// unknown routes.
+// EndpointPath returns the route's upstream endpoint path. Gemini paths are
+// model-scoped and built per record by geminiEndpoint; unknown routes have no
+// path at all.
 func (r Route) EndpointPath() string {
 	return routeEndpoints[r]
 }
 
+// geminiEndpoint builds the native Gemini endpoint path for one upstream model
+// ID and action.
+func geminiEndpoint(model, action string) string {
+	return "/v1/models/" + model + ":" + action
+}
+
+// validGeminiEndpoint reports whether path has the pinned Gemini shape with a
+// usable model segment. Dot-only names are rejected so the path cannot
+// collapse onto a parent segment; geminiPathPattern itself already excludes
+// '/', ':', '?', '#', '@', '%', and whitespace.
+func validGeminiEndpoint(path string) bool {
+	m := geminiPathPattern.FindStringSubmatch(path)
+	return m != nil && strings.Trim(m[1], ".") != ""
+}
+
 func routeFromString(s string) (Route, bool) {
+	if r := Route(s); r == RouteGemini {
+		return r, true
+	}
 	if _, ok := routeEndpoints[Route(s)]; ok {
 		return Route(s), true
 	}
@@ -71,6 +118,19 @@ type ModelRecord struct {
 	InputModes   []string
 	OutputModes  []string
 	Thinking     *pluginapi.ThinkingSupport
+}
+
+// StreamEndpointPath returns the endpoint path a streaming request must use.
+// Every route except Gemini serves both modes through one path; Gemini's
+// native API separates the actions, so a record publishes the non-stream
+// generateContent path and switches to streamGenerateContent here. A record
+// whose override pinned another action (or a path without the native action)
+// keeps that value unchanged.
+func (r ModelRecord) StreamEndpointPath() string {
+	if r.Protocol != RouteGemini {
+		return r.EndpointPath
+	}
+	return strings.Replace(r.EndpointPath, ":"+geminiActionGenerate, ":"+geminiActionStream, 1)
 }
 
 // UnsupportedModel is a discovered model excluded from the routable set,
@@ -114,23 +174,82 @@ type rawThinking struct {
 	Levels         []string `json:"levels"`
 }
 
-// prefixRoutes covers unknown variants of known families;
-// longest prefix wins (list is ordered longest-first).
+// prefixRoutes covers unknown variants of known families; longest prefix wins
+// (list is ordered longest-first).
+//
+// Evidence (models.dev opencode-go snapshot: provider default npm
+// @ai-sdk/openai-compatible, per-model provider.npm override
+// @ai-sdk/google -> Gemini, @ai-sdk/anthropic -> Messages,
+// @ai-sdk/openai -> Responses):
+//   - claude*          -> Messages  (claude-haiku-5-5 carries @ai-sdk/anthropic)
+//   - space-bunny*     -> Chat      (no override; provider default)
+//   - step-5-preview-free -> Chat   (no override; provider default)
+//   - cat-jam*         -> Chat      (no override; provider default)
+//
+// A family whose documented protocol differs from its prefix is corrected in
+// exactRoutes below rather than by narrowing these prefixes.
 var prefixRoutes = []struct {
 	prefix string
 	route  Route
 }{
 	{"muse-spark", RouteResponses},
+	{"space-bunny", RouteChatCompletions},
 	{"deepseek", RouteChatCompletions},
 	{"minimax", RouteMessages},
 	{"longcat", RouteChatCompletions},
+	{"gemini", RouteGemini},
+	{"claude", RouteMessages},
 	{"grok", RouteResponses},
 	{"gpt", RouteResponses},
 	{"kimi", RouteChatCompletions},
 	{"qwen", RouteMessages},
 	{"glm", RouteChatCompletions},
 	{"mimo", RouteChatCompletions},
+	{"cat-jam", RouteChatCompletions},
+	{"step", RouteChatCompletions},
 	{"hy", RouteChatCompletions},
+}
+
+// omenAlphaNote is the diagnostics line for the one catalog model that upstream
+// protocol metadata does not list. Evidence: the models.dev opencode-go
+// snapshot contains no omen* ID at all, and a read-only probe of the live
+// catalog's minimal chat request returned HTTP 200 but produced no SSE data
+// event within 25s (curl exit 28 after two direct TLS EOFs, so no inference
+// ran). The model is therefore routed as Chat Completions on compatibility
+// grounds only: upstream stream acceptance is still unconfirmed, and this note
+// is a pending-acceptance marker, not a claim that streaming works.
+const omenAlphaNote = `model "omen-alpha" routed via compatibility fallback (chat-completions); upstream stream acceptance pending`
+
+// exactRoutes pins the models whose documented upstream protocol differs from
+// what their family prefix would give them (arch §5 route priority). The table
+// is consulted after user overrides and before prefixRoutes, so an override
+// still wins and an unknown ID still falls through to the prefix table.
+//
+// Evidence: the models.dev opencode-go snapshot lists qwen3.6-plus and
+// qwen3.7-max with no provider.npm override, so they inherit the provider
+// default @ai-sdk/openai-compatible (Chat Completions), while every other qwen
+// ID carries @ai-sdk/anthropic (Messages) — only those two are corrected.
+// omen-alpha is the single ID absent from metadata (see omenAlphaNote).
+var exactRoutes = []struct {
+	id    string
+	route Route
+	note  string
+}{
+	{"qwen3.6-plus", RouteChatCompletions, ""},
+	{"qwen3.7-max", RouteChatCompletions, ""},
+	{"omen-alpha", RouteChatCompletions, omenAlphaNote},
+}
+
+// exactRoute looks an ID up in the exact compatibility table, folding case the
+// same way prefixRoutes does.
+func exactRoute(id string) (routeDecision, bool) {
+	id = strings.ToLower(id)
+	for _, r := range exactRoutes {
+		if r.id == id {
+			return routeDecision{route: r.route, warn: r.note}, true
+		}
+	}
+	return routeDecision{}, false
 }
 
 // Manager owns the catalog snapshot. All accessors are safe for
@@ -263,14 +382,15 @@ func (m *Manager) swap(entries []rawModel, extraWarns ...string) {
 			continue
 		}
 		seen[e.ID] = true
-		route, endpoint, ok, warn := m.resolve(e)
-		if warn != "" {
-			warns = append(warns, warn)
+		d := m.resolve(e)
+		if d.warn != "" {
+			warns = append(warns, d.warn)
 		}
-		if !ok {
+		if d.route == "" {
 			unsup = append(unsup, UnsupportedModel{UpstreamID: e.ID, Reason: "no route determined"})
 			continue
 		}
+		route, endpoint := d.route, d.endpoint
 		if !m.protocolEnabled(route) {
 			// Flags apply at snapshot build; a stale snapshot kept per
 			// FR-002 reflects the flags it was built with until the next
@@ -296,6 +416,13 @@ func (m *Manager) swap(entries []rawModel, extraWarns ...string) {
 		}
 		if endpoint == "" {
 			endpoint = route.EndpointPath()
+		}
+		if route == RouteGemini && !validGeminiEndpoint(endpoint) {
+			// The native Gemini path carries the model ID, so an entry whose
+			// ID (or an override template) is not a plain model segment could
+			// add a path segment or a query string to the upstream URL.
+			unsup = append(unsup, UnsupportedModel{UpstreamID: e.ID, Reason: geminiPathReason})
+			continue
 		}
 		inputModes := firstNonEmpty(e.InputModes, e.InputModalities)
 		outputModes := firstNonEmpty(e.OutputModes, e.OutputModalities)
@@ -354,27 +481,66 @@ func (m *Manager) protocolEnabled(r Route) bool {
 		return m.cfg.Protocols.Messages
 	case RouteResponses:
 		return m.cfg.Protocols.Responses
+	case RouteGemini:
+		return m.cfg.Protocols.Gemini
 	}
 	return true
 }
 
-// resolve applies route priority strictly: user override, compatibility
-// table (family prefix), none (arch §5).
-func (m *Manager) resolve(e rawModel) (Route, string, bool, string) {
+// routeDecision is the outcome of resolving one catalog entry (arch §5): route
+// is "" when no priority tier matched, endpoint is the model-scoped path for a
+// route without a static one (Gemini) or the path a user override pinned, and
+// warn is the spec 04 §5 diagnostics line for an applied override.
+type routeDecision struct {
+	route    Route
+	endpoint string
+	warn     string
+}
+
+// resolve applies route priority strictly (arch §5): user override > exact
+// compatibility table > family prefix table > unsupported.
+func (m *Manager) resolve(e rawModel) routeDecision {
 	if o, ok := m.cfg.RouteOverrides[e.ID]; ok {
 		// Spec 04 §5: an override MUST be visible in diagnostics. Load
 		// validation (spec 04 §6) guarantees a known protocol, so the
 		// map lookup above is the only decision point here.
-		return Route(o.Protocol), o.Endpoint, true, fmt.Sprintf(
-			"model %q routed via user override (%s %s)", e.ID, o.Protocol, o.Endpoint)
+		return resolveOverride(e.ID, o)
 	}
 	id := strings.ToLower(e.ID)
+	if d, ok := exactRoute(id); ok {
+		return d
+	}
 	for _, p := range prefixRoutes {
 		if strings.HasPrefix(id, p.prefix) {
-			return p.route, "", true, ""
+			if p.route == RouteGemini {
+				return routeDecision{route: p.route, endpoint: geminiEndpoint(e.ID, geminiActionGenerate)}
+			}
+			return routeDecision{route: p.route}
 		}
 	}
-	return "", "", false, ""
+	return routeDecision{}
+}
+
+// resolveOverride turns one validated user override into a decision. The
+// Gemini route has no static endpoint: an override that does not name one
+// supplies the model and action templates (defaulting to the cataloged ID and
+// generateContent) that make up the native path.
+func resolveOverride(id string, o config.RouteOverride) routeDecision {
+	route := Route(o.Protocol)
+	endpoint := o.Endpoint
+	if route == RouteGemini && endpoint == "" {
+		model := o.Model
+		if model == "" {
+			model = config.GeminiModelPlaceholder
+		}
+		action := o.Action
+		if action == "" {
+			action = geminiActionGenerate
+		}
+		endpoint = geminiEndpoint(strings.ReplaceAll(model, config.GeminiModelPlaceholder, id), action)
+	}
+	return routeDecision{route: route, endpoint: endpoint, warn: fmt.Sprintf(
+		"model %q routed via user override (%s %s)", id, o.Protocol, endpoint)}
 }
 
 // JoinUpstreamURL joins the configured base-url onto an endpoint path and

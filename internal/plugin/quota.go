@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 
 	"opencode-go-cliproxyapi/internal/config"
 	"opencode-go-cliproxyapi/resources"
@@ -59,10 +59,17 @@ func quotaIdentity(key string) (id, label string) {
 }
 
 func (m *Manager) HandleManagement(ctx context.Context, req pluginapi.ManagementRequest) (pluginapi.ManagementResponse, error) {
-	if req.Method == http.MethodGet && req.Path == "/v0/resource/plugins/"+pluginName+"/quota" {
-		return pluginapi.ManagementResponse{Headers: http.Header{"Content-Type": []string{"text/html; charset=utf-8"}}, Body: []byte(resources.QuotaPage)}, nil
+	// CPA v8 exposes versioned management routes; keep the legacy v0 alias
+	// usable for existing management clients and the inherited tests.
+	version := "/v8"
+	if strings.HasPrefix(req.Path, "/v0/") {
+		version = "/v0"
 	}
-	if req.Method != http.MethodPost || req.Path != "/v0/management/plugins/"+pluginName+"/quota-usage" {
+	if req.Method == http.MethodGet && req.Path == version+"/resource/plugins/"+pluginName+"/quota" {
+		page := strings.ReplaceAll(resources.QuotaPage, "__QUOTA_ENDPOINT__", version+"/management/plugins/"+pluginName+"/quota-usage")
+		return pluginapi.ManagementResponse{Headers: http.Header{"Content-Type": []string{"text/html; charset=utf-8"}}, Body: []byte(page)}, nil
+	}
+	if req.Method != http.MethodPost || req.Path != version+"/management/plugins/"+pluginName+"/quota-usage" {
 		return pluginapi.ManagementResponse{StatusCode: http.StatusNotFound, Body: []byte(`{"error":"not found"}`)}, nil
 	}
 	var body quotaRequest

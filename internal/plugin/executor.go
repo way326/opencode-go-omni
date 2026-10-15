@@ -12,15 +12,17 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 
 	"opencode-go-cliproxyapi/internal/adapter/chatcompletions"
+	"opencode-go-cliproxyapi/internal/adapter/gemini"
 	"opencode-go-cliproxyapi/internal/adapter/messages"
 	"opencode-go-cliproxyapi/internal/adapter/responses"
 	"opencode-go-cliproxyapi/internal/adapter/shared"
@@ -36,16 +38,103 @@ import (
 // ids returned by DoStream are UPSTREAM and never interchangeable (§4).
 type executorRequest struct {
 	pluginapi.ExecutorRequest
-	StreamID string `json:"stream_id,omitempty"`
+	StreamID       string `json:"stream_id,omitempty"`
+	HostCallbackID string `json:"host_callback_id,omitempty"`
 }
 
 // resolvedExecution carries everything both execution paths need after
 // model/key resolution succeeded.
 type resolvedExecution struct {
-	cfg   config.Config
-	rec   catalog.ModelRecord
-	key   string
-	tools shared.ResponseTools
+	cfg        config.Config
+	rec        catalog.ModelRecord
+	key        string
+	tools      shared.ResponseTools
+	original   []byte
+	upstream   []byte
+	model      string
+	callbackID string
+}
+
+// Payload contains CPA's effective request, including request rewrites. The
+// original body is retained separately by CPA for response/session metadata.
+func executorBody(req executorRequest) []byte {
+	if len(req.Payload) > 0 {
+		return req.Payload
+	}
+	return req.OriginalRequest
+}
+
+func executorResponseFormat(req executorRequest) string {
+	if req.Format != "" {
+		return req.Format
+	}
+	return req.SourceFormat
+}
+
+func prepareUpstreamRequest(res *resolvedExecution, req executorRequest) ([]byte, *errclass.Error) {
+	body := executorBody(req)
+	res.original, res.model = req.OriginalRequest, res.rec.UpstreamID
+	if len(res.original) == 0 {
+		res.original = body
+	}
+	if res.rec.Protocol == catalog.RouteGemini && res.rec.EndpointPath != "" {
+		// A model/endpoint override controls the actual upstream model. Keep
+		// the body model and translation metadata aligned with that path.
+		res.model = strings.TrimPrefix(res.rec.EndpointPath, "/v1/models/")
+		res.model = strings.TrimSuffix(strings.TrimSuffix(res.model, ":generateContent"), ":streamGenerateContent")
+	}
+	var out []byte
+	var e *errclass.Error
+	if res.rec.Protocol == catalog.RouteGemini {
+		out, e = gemini.BuildRequestWithContext(context.Background(), res.model, req.SourceFormat, body, req.Stream, res.rec.Thinking, &res.tools)
+	} else if req.SourceFormat == "gemini" {
+		out, e = buildGeminiClientRequest(res.rec.Protocol, res.rec.UpstreamID, body, req.Stream, res.rec.Thinking)
+	} else {
+		out, e = buildUpstreamRequest(res.rec.Protocol, res.model, req.SourceFormat, body, res.rec.Thinking, &res.tools)
+	}
+	res.upstream = out
+	return out, e
+}
+
+func executionURL(res *resolvedExecution, stream bool) (string, *errclass.Error) {
+	u, err := url.Parse(catalog.JoinUpstreamURL(res.cfg.BaseURL, res.rec.EndpointPath))
+	if err != nil {
+		return "", errclass.Translation("invalid upstream URL")
+	}
+	if res.rec.Protocol == catalog.RouteGemini {
+		for _, suffix := range []string{":generateContent", ":streamGenerateContent"} {
+			u.Path = strings.TrimSuffix(u.Path, suffix)
+		}
+		if stream {
+			u.Path += ":streamGenerateContent"
+			q := u.Query()
+			q.Set("alt", "sse")
+			u.RawQuery = q.Encode()
+		} else {
+			u.Path += ":generateContent"
+		}
+	}
+	return u.String(), nil
+}
+
+func convertExecutionResponse(res *resolvedExecution, format string, status int, body []byte) ([]byte, *errclass.Error) {
+	if res.rec.Protocol == catalog.RouteGemini {
+		return gemini.ConvertNonStreamResponseWithContext(format, status, body, res.model, res.original, res.upstream)
+	}
+	if format == "gemini" {
+		return convertGeminiClientResponse(res.rec.Protocol, res.model, res.original, res.upstream, body)
+	}
+	return convertNonStream(res.rec.Protocol, format, status, body, &res.tools)
+}
+
+func executionStreamConverter(res *resolvedExecution, format string) streamConverter {
+	if res.rec.Protocol == catalog.RouteGemini {
+		return gemini.NewStreamConverterWithContext(format, res.model, res.original, res.upstream)
+	}
+	if format == "gemini" {
+		return newGeminiClientStreamConverter(res.rec.Protocol, res.model, res.original, res.upstream)
+	}
+	return newStreamConverter(res.rec.Protocol, format, &res.tools)
 }
 
 // resolveExecution resolves the requested model against the snapshot and
@@ -75,7 +164,7 @@ func (m *Manager) resolveExecution(req executorRequest) (*resolvedExecution, []b
 			StatusCode: http.StatusNotFound,
 		})
 	}
-	return &resolvedExecution{cfg: cfg, rec: rec, key: key, tools: *shared.NewResponseTools()}, nil
+	return &resolvedExecution{cfg: cfg, rec: rec, key: key, tools: *shared.NewResponseTools(), callbackID: req.HostCallbackID}, nil
 }
 
 // handleExecute implements executor.execute (non-stream). Stream-flagged
@@ -98,22 +187,25 @@ func (m *Manager) handleExecute(request []byte) ([]byte, error) {
 		return classEnvelope(eErr), nil
 	}
 	debugTrace("executor session mode=%s source_format=%s x_opencode_session=%s fallback=%t", "non-stream", req.SourceFormat, sessionID, sessionID == emptyOpenCodeSessionID)
-	upstreamBody, eErr := buildUpstreamRequest(res.rec.Protocol, res.rec.UpstreamID, req.SourceFormat, req.OriginalRequest, res.rec.Thinking, &res.tools)
+	upstreamBody, eErr := prepareUpstreamRequest(res, req)
 	if eErr != nil {
 		return classEnvelope(eErr), nil
 	}
 
-	url := catalog.JoinUpstreamURL(res.cfg.BaseURL, res.rec.EndpointPath)
+	url, eErr := executionURL(res, false)
+	if eErr != nil {
+		return classEnvelope(eErr), nil
+	}
 	debugTrace("executor resolved public_model=%s upstream_model=%s route=%s url=%s key_count=%d", req.Model, res.rec.UpstreamID, res.rec.Protocol, url, len(res.cfg.APIKeys))
 	debugTrace("executor sending non-stream url=%s body_len=%d", url, len(upstreamBody))
 	ctx, cancel := context.WithTimeout(context.Background(), res.cfg.RequestTimeout)
 	defer cancel()
-	resp, err := m.bridge.Do(ctx, pluginapi.HTTPRequest{
+	resp, err := m.bridge.DoWithCallback(ctx, pluginapi.HTTPRequest{
 		Method:  http.MethodPost,
 		URL:     url,
 		Headers: upstreamAuthHeaders(res.rec.Protocol, res.key, sessionID),
 		Body:    upstreamBody,
-	})
+	}, res.callbackID)
 	if err != nil {
 		debugTrace("executor non-stream network error: %v", err)
 		return classEnvelope(errclass.FromNetwork(err)), nil
@@ -126,7 +218,7 @@ func (m *Manager) handleExecute(request []byte) ([]byte, error) {
 	if int64(len(resp.Body)) > res.cfg.MaxResponseBytes {
 		return classEnvelope(errclass.Translation("response exceeds max-response-bytes")), nil
 	}
-	converted, eErr := convertNonStream(res.rec.Protocol, req.SourceFormat, resp.StatusCode, resp.Body, &res.tools)
+	converted, eErr := convertExecutionResponse(res, executorResponseFormat(req), resp.StatusCode, resp.Body)
 	if eErr != nil {
 		return classEnvelope(eErr), nil
 	}
@@ -141,6 +233,8 @@ func buildUpstreamRequest(route catalog.Route, upstreamModel, sourceFormat strin
 		return messages.BuildRequest(upstreamModel, sourceFormat, sourceBody, ts, tools...)
 	case catalog.RouteResponses:
 		return responses.BuildRequest(upstreamModel, sourceFormat, sourceBody, ts, tools...)
+	case catalog.RouteGemini:
+		return gemini.BuildRequest(upstreamModel, sourceFormat, sourceBody, ts, tools...)
 	}
 	return nil, errclass.Translation("unsupported route")
 }
@@ -154,20 +248,23 @@ func upstreamAuthHeaders(route catalog.Route, key, sessionID string) http.Header
 		h = chatcompletions.AuthHeaders(key)
 	}
 	h.Set("x-opencode-session", sessionID)
+	h.Set("Content-Type", "application/json")
 	return h
 }
 
 const emptyOpenCodeSessionID = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
-// resolveOpenCodeSessionID applies the FR-012/AC-H precedence: CPA's canonical
-// identity, an explicit inbound session header, then the existing content hash.
+// An explicit OpenCode session must beat CPA's derived identity: otherwise
+// independent conversations with identical first turns can collapse together.
 func resolveOpenCodeSessionID(req executorRequest) (string, *errclass.Error) {
+	if sid := req.Headers.Get("X-Opencode-Session"); sid != "" {
+		return sid, nil
+	}
 	if sid, ok := req.Metadata["canonical_session_id"].(string); ok && sid != "" {
 		return sid, nil
 	}
 	for _, name := range []string{
 		"X-Session-Affinity",
-		"X-Opencode-Session",
 		"X-Session-Id",
 		"X-Claude-Code-Session-Id",
 		"Session-Id",
@@ -279,6 +376,40 @@ func deriveOpenCodeSessionID(sourceFormat string, originalRequest []byte) (strin
 				return "", eErr
 			}
 		}
+	case "gemini":
+		var body struct {
+			Contents []struct {
+				Role  string                       `json:"role"`
+				Parts []map[string]json.RawMessage `json:"parts"`
+			} `json:"contents"`
+		}
+		if err := json.Unmarshal(originalRequest, &body); err != nil {
+			return "", errclass.Translation("malformed gemini request JSON")
+		}
+		started := false
+		for _, turn := range body.Contents {
+			if turn.Role != "user" && turn.Role != "" {
+				if started {
+					break
+				}
+				continue
+			}
+			started = true
+			for _, part := range turn.Parts {
+				if raw, ok := part["text"]; ok {
+					var value string
+					if json.Unmarshal(raw, &value) != nil {
+						return "", errclass.Translation("invalid gemini text part")
+					}
+					content.WriteString(value)
+				}
+				for _, key := range []string{"inlineData", "fileData"} {
+					if raw, ok := part[key]; ok {
+						content.Write(raw)
+					}
+				}
+			}
+		}
 	default:
 		return "", shared.UnsupportedFormat(sourceFormat, "OpenCode Go session derivation")
 	}
@@ -299,6 +430,8 @@ func convertNonStream(route catalog.Route, sourceFormat string, status int, body
 		return messages.ConvertNonStreamResponse(sourceFormat, status, body, tools...)
 	case catalog.RouteResponses:
 		return responses.ConvertNonStreamResponse(sourceFormat, status, body, tools...)
+	case catalog.RouteGemini:
+		return gemini.ConvertNonStreamResponse(sourceFormat, status, body, tools...)
 	}
 	return nil, errclass.Translation("unsupported route")
 }
@@ -362,21 +495,24 @@ func (m *Manager) executeStream(req executorRequest) ([]byte, error) {
 		return classEnvelope(eErr), nil
 	}
 	debugTrace("executor session mode=%s source_format=%s x_opencode_session=%s fallback=%t", "stream", req.SourceFormat, sessionID, sessionID == emptyOpenCodeSessionID)
-	upstreamBody, eErr := buildUpstreamRequest(res.rec.Protocol, res.rec.UpstreamID, req.SourceFormat, req.OriginalRequest, res.rec.Thinking, &res.tools)
+	upstreamBody, eErr := prepareUpstreamRequest(res, req)
 	if eErr != nil {
 		return classEnvelope(eErr), nil
 	}
 
-	url := catalog.JoinUpstreamURL(res.cfg.BaseURL, res.rec.EndpointPath)
+	url, eErr := executionURL(res, true)
+	if eErr != nil {
+		return classEnvelope(eErr), nil
+	}
 	debugTrace("executor sending stream url=%s body_len=%d", url, len(upstreamBody))
 	ctx, cancel := context.WithTimeout(context.Background(), res.cfg.RequestTimeout)
 	defer cancel()
-	st, _, id, err := m.bridge.DoStream(ctx, pluginapi.HTTPRequest{
+	st, _, id, err := m.bridge.DoStreamWithCallback(ctx, pluginapi.HTTPRequest{
 		Method:  http.MethodPost,
 		URL:     url,
 		Headers: upstreamAuthHeaders(res.rec.Protocol, res.key, sessionID),
 		Body:    upstreamBody,
-	})
+	}, res.callbackID)
 	debugTrace("executor stream DoStream status=%d upstreamID=%s err=%v", st, id, err)
 	if err != nil {
 		return classEnvelope(errclass.FromNetwork(err)), nil
@@ -387,7 +523,17 @@ func (m *Manager) executeStream(req executorRequest) ([]byte, error) {
 			watchdog := time.AfterFunc(res.cfg.RequestTimeout, func() {
 				_ = m.bridge.StreamClose(id)
 			})
-			body, _, _, _ = m.bridge.StreamRead(id)
+			for int64(len(body)) < res.cfg.MaxResponseBytes {
+				chunk, readError, closed, readErr := m.bridge.StreamRead(id)
+				remaining := res.cfg.MaxResponseBytes - int64(len(body))
+				if int64(len(chunk)) > remaining {
+					chunk = chunk[:int(remaining)]
+				}
+				body = append(body, chunk...)
+				if closed || readErr != nil || readError != "" || json.Valid(body) {
+					break
+				}
+			}
 			watchdog.Stop()
 			_ = m.bridge.StreamClose(id)
 		}
@@ -402,7 +548,7 @@ func (m *Manager) executeStream(req executorRequest) ([]byte, error) {
 		if m.bridge != nil {
 			defer m.bridge.inFlight.Done()
 		}
-		m.pumpStream(downID, id, res, req.SourceFormat)
+		m.pumpStream(downID, id, res, executorResponseFormat(req))
 	}()
 	return okEnvelope(struct{}{}), nil
 }
@@ -429,7 +575,7 @@ func (m *Manager) pumpStream(downID, upstreamID string, res *resolvedExecution, 
 	})
 	defer watchdog.Stop()
 
-	conv := newStreamConverter(res.rec.Protocol, sourceFormat, &res.tools)
+	conv := executionStreamConverter(res, sourceFormat)
 	var (
 		total          int64
 		upstreamClosed bool
@@ -471,7 +617,21 @@ func (m *Manager) pumpStream(downID, upstreamID string, res *resolvedExecution, 
 		}
 	}
 	debugTrace("executor stream loop end convDone=%t upstreamClosed=%t", convDone, upstreamClosed)
-	if !convDone && upstreamClosed {
+	// Finalize even when Feed saw a sentinel: Gemini's finisher validates
+	// completion and guards duplicate terminal events itself.
+	if finisher, ok := conv.(interface {
+		Finish() ([][]byte, *errclass.Error)
+	}); ok {
+		flushed, finishErr := finisher.Finish()
+		if finishErr != nil {
+			closeStreams(errclass.Redact(finishErr.Message))
+			return
+		}
+		if emitErr := m.emitAll(downID, flushed); emitErr != nil {
+			closeStreams(errclass.Redact(emitErr.Error()))
+			return
+		}
+	} else if !convDone && upstreamClosed {
 		if flusher, ok := conv.(interface{ Flush() [][]byte }); ok {
 			flushed := flusher.Flush()
 			if emitErr := m.emitAll(downID, flushed); emitErr != nil {

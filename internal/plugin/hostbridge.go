@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
 // RawCaller performs one host callback round-trip: method name plus JSON
@@ -44,10 +44,11 @@ func NewHostBridge(call RawCaller) *HostBridge {
 
 // hostHTTPReq is the wire shape accepted by host.http.do / do_stream.
 type hostHTTPReq struct {
-	Method  string      `json:"method"`
-	URL     string      `json:"url"`
-	Headers http.Header `json:"headers"`
-	Body    []byte      `json:"body"`
+	HostCallbackID string      `json:"host_callback_id,omitempty"`
+	Method         string      `json:"method"`
+	URL            string      `json:"url"`
+	Headers        http.Header `json:"headers"`
+	Body           []byte      `json:"body"`
 }
 
 type hostAuthListResponse struct {
@@ -287,8 +288,16 @@ func (b *HostBridge) invoke(ctx context.Context, method string, payload any, wha
 // "host.http.do"; transport-level failures surface as errors whose text is
 // safe for logs (no keys, no response bodies).
 func (b *HostBridge) Do(ctx context.Context, req pluginapi.HTTPRequest) (pluginapi.HTTPResponse, error) {
+	return b.DoWithCallback(ctx, req, "")
+}
+
+// DoWithCallback preserves CPA request context, cancellation, and logging.
+// Native RPC host HTTP callbacks use the global CPA proxy setting; selected
+// auth proxy overrides are not exposed by that host API in v8.0.28.
+func (b *HostBridge) DoWithCallback(ctx context.Context, req pluginapi.HTTPRequest, callbackID string) (pluginapi.HTTPResponse, error) {
 	env, err := b.invoke(ctx, pluginabi.MethodHostHTTPDo, hostHTTPReq{
-		Method: req.Method, URL: req.URL, Headers: req.Headers, Body: req.Body,
+		HostCallbackID: callbackID,
+		Method:         req.Method, URL: req.URL, Headers: req.Headers, Body: req.Body,
 	}, "host http do")
 	if err != nil {
 		return pluginapi.HTTPResponse{}, err
@@ -310,8 +319,13 @@ func (b *HostBridge) Do(ctx context.Context, req pluginapi.HTTPRequest) (plugina
 // grace window is closed by the background abandon goroutine instead, so
 // no registered upstream stream ever leaks regardless of host latency.
 func (b *HostBridge) DoStream(ctx context.Context, req pluginapi.HTTPRequest) (statusCode int, headers http.Header, upstreamStreamID string, err error) {
+	return b.DoStreamWithCallback(ctx, req, "")
+}
+
+func (b *HostBridge) DoStreamWithCallback(ctx context.Context, req pluginapi.HTTPRequest, callbackID string) (statusCode int, headers http.Header, upstreamStreamID string, err error) {
 	payloadBytes, _ := json.Marshal(hostHTTPReq{
-		Method: req.Method, URL: req.URL, Headers: req.Headers, Body: req.Body,
+		HostCallbackID: callbackID,
+		Method:         req.Method, URL: req.URL, Headers: req.Headers, Body: req.Body,
 	})
 	raw, late, err := b.callWithTimeoutResult(ctx, pluginabi.MethodHostHTTPDoStream, payloadBytes, streamTimeoutGrace, b.closeLateStream)
 	if late {

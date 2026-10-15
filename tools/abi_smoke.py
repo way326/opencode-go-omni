@@ -1,0 +1,138 @@
+"""Offline Windows C ABI smoke test. No network, files of CPA, or listening ports.
+
+Usage: python tools/abi_smoke.py path/to/opencode-go-unified.dll
+The fake host keeps auth records in memory and returns deterministic inference.
+"""
+import base64
+import ctypes as C
+import json
+import sys
+import threading
+
+
+def b64(value):
+    if isinstance(value, str):
+        value = value.encode()
+    return base64.b64encode(value).decode()
+
+
+class Buffer(C.Structure):
+    _fields_ = [("ptr", C.c_void_p), ("len", C.c_size_t)]
+
+
+HostCall = C.CFUNCTYPE(C.c_int, C.c_void_p, C.c_char_p, C.c_void_p, C.c_size_t, C.POINTER(Buffer))
+Free = C.CFUNCTYPE(None, C.c_void_p, C.c_size_t)
+PluginCall = C.CFUNCTYPE(C.c_int, C.c_char_p, C.c_void_p, C.c_size_t, C.POINTER(Buffer))
+Shutdown = C.CFUNCTYPE(None)
+
+
+class HostAPI(C.Structure):
+    _fields_ = [("abi_version", C.c_uint32), ("host_ctx", C.c_void_p), ("call", HostCall), ("free_buffer", Free)]
+
+
+class PluginAPI(C.Structure):
+    _fields_ = [("abi_version", C.c_uint32), ("call", PluginCall), ("free_buffer", Free), ("shutdown", Shutdown)]
+
+
+def main(path):
+    held, calls, failures = {}, [], []
+    lock = threading.Lock()
+    closed = threading.Event()
+    emitted = []
+    key = "sk-offline-fixture-1"
+    model = "gemini-4-argon-contributor"
+    response = {"candidates": [{"index": 0, "content": {"role": "model", "parts": [{"text": "offline OK", "thoughtSignature": "AQID"}]}, "finishReason": "STOP"}], "usageMetadata": {"promptTokenCount": 2, "candidatesTokenCount": 1, "totalTokenCount": 3}}
+    wire = ("data: " + json.dumps(response, separators=(",", ":")) + "\r\n\r\n").encode()
+    chunks = [wire[:5], wire[5:17], wire[17:]]
+
+    @Free
+    def free(ptr, _size):
+        with lock:
+            held.pop(ptr, None)
+
+    @HostCall
+    def host_call(_ctx, method_raw, ptr, size, output):
+        try:
+            method = method_raw.decode()
+            req = json.loads(C.string_at(ptr, size))
+            with lock:
+                calls.append(method)
+            result = {}
+            if method == "host.auth.list":
+                result = {"files": []}
+            elif method == "host.http.do":
+                assert req["url"].endswith("/models"), "unexpected nonstream URL"
+                result = {"StatusCode": 200, "Headers": {}, "Body": b64(json.dumps({"data": [{"id": model}, {"id": "glm-5.3"}, {"id": "gpt-5.6-luna"}, {"id": "minimax-m3"}]}))}
+            elif method == "host.http.do_stream":
+                assert req["host_callback_id"] == "callback-offline"
+                assert req["url"] == f"https://opencode.ai/inference/go/v1/models/{model}:streamGenerateContent?alt=sse"
+                headers = {name.lower(): values for name, values in req["headers"].items()}
+                assert headers["authorization"] == ["Bearer " + key]
+                assert "x-goog-api-key" not in headers
+                assert headers["x-opencode-session"] == ["offline-session-A"]
+                assert "contents" in json.loads(base64.b64decode(req["body"]))
+                result = {"status_code": 200, "headers": {"Content-Type": ["text/event-stream"]}, "stream_id": "up-offline"}
+            elif method == "host.http.stream_read":
+                result = {"payload": b64(chunks.pop(0))} if chunks else {"done": True}
+            elif method == "host.stream.emit":
+                emitted.append(base64.b64decode(req["payload"]))
+            elif method == "host.stream.close":
+                assert not req.get("error"), "downstream stream failed"
+                closed.set()
+            encoded = json.dumps({"ok": True, "result": result}).encode()
+            allocated = C.create_string_buffer(encoded)
+            addr = C.addressof(allocated)
+            with lock:
+                held[addr] = allocated
+            output.contents.ptr = addr
+            output.contents.len = len(encoded)
+            return 0
+        except Exception as exc:
+            failures.append(str(exc))
+            return 1
+
+    dll = C.CDLL(path)
+    init = dll.cliproxy_plugin_init
+    init.argtypes = [C.POINTER(HostAPI), C.POINTER(PluginAPI)]
+    init.restype = C.c_int
+    host = HostAPI(1, None, host_call, free)
+    plug = PluginAPI()
+    assert init(C.byref(host), C.byref(plug)) == 0
+    assert plug.abi_version == 1
+
+    def invoke(method, request):
+        encoded = json.dumps(request).encode()
+        buf = C.create_string_buffer(encoded)
+        output = Buffer()
+        assert plug.call(method.encode(), C.cast(buf, C.c_void_p), len(encoded), C.byref(output)) == 0
+        try:
+            envelope = json.loads(C.string_at(output.ptr, output.len))
+            assert envelope["ok"], envelope.get("error")
+            return envelope["result"]
+        finally:
+            plug.free_buffer(output.ptr, output.len)
+
+    try:
+        reg = invoke("plugin.register", {"schema_version": 6, "config_yaml": b64("api-keys:\n  - value: " + key + "\n")})
+        meta = reg["metadata"]
+        assert meta.get("Name", meta.get("name")) == "opencode-go-unified"
+        assert reg["schema_version"] == 6
+        assert "gemini" in reg["capabilities"]["executor_input_formats"]
+        listed = invoke("model.static", {})
+        records = listed.get("Models", listed.get("models", []))
+        assert len(records) == 4
+        body = b64('{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}')
+        invoke("executor.execute_stream", {"AuthProvider": "opencode-go", "AuthAttributes": {"api_key": key}, "Model": "opencode-go/" + model, "SourceFormat": "gemini", "Format": "gemini", "Stream": True, "OriginalRequest": body, "Payload": body, "Headers": {"X-Opencode-Session": ["offline-session-A"]}, "stream_id": "down-offline", "host_callback_id": "callback-offline"})
+        assert closed.wait(15), "DLL stream timed out"
+        assert emitted and all(json.loads(chunk) for chunk in emitted)
+        assert any(b"thoughtSignature" in chunk for chunk in emitted)
+        assert any(b"usageMetadata" in chunk for chunk in emitted)
+        assert not failures, failures
+        print(json.dumps({"abi": 1, "schema": 6, "catalog_models": len(records), "stream_chunks": len(emitted), "host_calls": len(calls), "network_requests": 0, "listeners_started": 0, "result": "PASS"}))
+    finally:
+        plug.shutdown()
+    assert not held, "host callback buffers leaked"
+
+
+if __name__ == "__main__":
+    main(sys.argv[1])

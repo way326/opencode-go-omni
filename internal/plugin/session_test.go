@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
 func TestResolveOpenCodeSessionIDPrecedence(t *testing.T) {
@@ -16,7 +16,8 @@ func TestResolveOpenCodeSessionIDPrecedence(t *testing.T) {
 		want     string
 	}{
 		{name: "canonical wins", metadata: map[string]any{"canonical_session_id": "canonical"}, headers: http.Header{"X-Session-Affinity": []string{"header"}}, want: "canonical"},
-		{name: "headers use documented order", headers: http.Header{"X-Session-Affinity": []string{"affinity"}, "X-Opencode-Session": []string{"opencode"}}, want: "affinity"},
+		{name: "explicit opencode session wins", headers: http.Header{"X-Session-Affinity": []string{"affinity"}, "X-Opencode-Session": []string{"opencode"}}, want: "opencode"},
+		{name: "explicit session beats derived canonical", metadata: map[string]any{"canonical_session_id": "derived"}, headers: http.Header{"X-Opencode-Session": []string{"unique"}}, want: "unique"},
 		{name: "empty earlier header is skipped", headers: http.Header{"X-Session-Affinity": []string{""}, "X-Opencode-Session": []string{"opencode"}}, want: "opencode"},
 		{name: "opaque values are preserved", headers: http.Header{"X-Session-Id": []string{"  opaque\tvalue  "}}, want: "  opaque\tvalue  "},
 	}
@@ -89,6 +90,7 @@ func TestDeriveOpenCodeSessionID(t *testing.T) {
 
 func TestDeriveOpenCodeSessionIDCrossFormatParityAndErrors(t *testing.T) {
 	bodies := map[string]string{
+		"gemini":          `{"contents":[{"role":"user","parts":[{"text":"same"}]}]}`,
 		"openai":          `{"messages":[{"role":"user","content":"same"}]}`,
 		"claude":          `{"messages":[{"role":"user","content":"same"}]}`,
 		"openai-response": `{"input":"same"}`,

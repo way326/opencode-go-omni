@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 
 	"opencode-go-cliproxyapi/internal/adapter/shared"
 	"opencode-go-cliproxyapi/internal/catalog"
@@ -397,7 +397,7 @@ func TestExecuteChatRoute(t *testing.T) {
 	if wire["method"] != http.MethodPost {
 		t.Fatalf("bridged method = %v", wire["method"])
 	}
-	if wire["url"] != "https://opencode.ai/zen/go/v1/chat/completions" {
+	if wire["url"] != "https://opencode.ai/inference/go/v1/chat/completions" {
 		t.Fatalf("bridged url = %v", wire["url"])
 	}
 	headers := wire["headers"].(map[string]any)
@@ -1304,7 +1304,7 @@ func TestRegistrationCapabilitiesIncludeExecutor(t *testing.T) {
 	}
 	var reg registrationResult
 	decodeResult(t, resp, &reg)
-	want := []string{"openai", "claude", "openai-response"}
+	want := []string{"openai", "claude", "openai-response", "gemini"}
 	if !reg.Capabilities.Executor || !reg.Capabilities.AuthProvider ||
 		!reflectDeepEqualStrings(reg.Capabilities.ExecutorInputFormats, want) ||
 		!reflectDeepEqualStrings(reg.Capabilities.ExecutorOutputFormats, want) {

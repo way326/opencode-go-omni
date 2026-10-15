@@ -74,6 +74,23 @@ func packageLibrary(libraryPath, archivePath string) ([]byte, error) {
 	if _, errCopy := io.Copy(entry, library); errCopy != nil {
 		return nil, fmt.Errorf("copy library: %w", errCopy)
 	}
+	// Keep installation guidance and upstream attribution with the local fork.
+	for _, name := range []string{"README.md", "LICENSE", "config.example.yaml", "VALIDATION.md"} {
+		data, errRead := os.ReadFile(name)
+		if os.IsNotExist(errRead) {
+			continue
+		}
+		if errRead != nil {
+			return nil, fmt.Errorf("read %s: %w", name, errRead)
+		}
+		item, errCreate := writer.Create(name)
+		if errCreate != nil {
+			return nil, fmt.Errorf("package %s: %w", name, errCreate)
+		}
+		if _, errWrite := item.Write(data); errWrite != nil {
+			return nil, fmt.Errorf("write %s: %w", name, errWrite)
+		}
+	}
 	if errClose := writer.Close(); errClose != nil {
 		return nil, fmt.Errorf("close zip writer: %w", errClose)
 	}

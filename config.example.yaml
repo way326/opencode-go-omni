@@ -1,0 +1,26 @@
+# Merge this block into CPA v8 configuration after reviewing the new plugin.
+# Do not enable the original plugin at the same time: both own opencode-go.
+plugins:
+  enabled: true
+  configs:
+    opencode-go-cliproxyapi:
+      enabled: false
+    opencode-go-unified:
+      enabled: true
+      base-url: "https://opencode.ai/inference/go/v1"
+      api-keys:
+        - value: "${OPENCODE_GO_API_KEY}"
+      model-prefix:
+        enabled: true
+        value: "opencode-go"
+      protocols:
+        chat-completions: true
+        messages: true
+        responses: true
+        gemini: true
+      catalog:
+        refresh-interval: "15m"
+        stale-while-unavailable: true
+      request-timeout: "5m"
+      max-response-bytes: 67108864
+      allow-http: false

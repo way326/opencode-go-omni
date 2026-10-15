@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 
 	"opencode-go-cliproxyapi/internal/catalog"
 	"opencode-go-cliproxyapi/internal/config"
@@ -23,8 +23,8 @@ const ProviderID = "opencode-go"
 
 // pluginName / pluginVersion are reported in registration metadata.
 const (
-	pluginName    = "opencode-go-cliproxyapi"
-	pluginVersion = "0.1.10"
+	pluginName    = "opencode-go-unified"
+	pluginVersion = "0.2.0-dev"
 )
 
 // githubRepoURL satisfies the host's validPlugin gate (host.go
@@ -178,7 +178,7 @@ func pluginConfigFields() []pluginapi.ConfigField {
 		{
 			Name:        "base-url",
 			Type:        pluginapi.ConfigFieldTypeString,
-			Description: "Upstream base URL (default: https://opencode.ai/zen/go/v1).",
+			Description: "Upstream base URL (default: https://opencode.ai/inference/go/v1).",
 		},
 		{
 			Name:        "catalog-url",
@@ -198,7 +198,7 @@ func pluginConfigFields() []pluginapi.ConfigField {
 		{
 			Name:        "protocols",
 			Type:        pluginapi.ConfigFieldTypeObject,
-			Description: "Protocol enable/disable switches (`chat-completions: bool`, `messages: bool`, `responses: bool`).",
+			Description: "Protocol switches (`chat-completions`, `messages`, `responses`, `gemini`).",
 		},
 		{
 			Name:        "route-overrides",
@@ -224,7 +224,7 @@ func pluginConfigFields() []pluginapi.ConfigField {
 }
 
 func registrationEnvelope() []byte {
-	formats := []string{"openai", "claude", "openai-response"}
+	formats := []string{"openai", "claude", "openai-response", "gemini"}
 	return okEnvelope(registrationResult{
 		SchemaVersion: pluginabi.SchemaVersion,
 		Metadata: pluginapi.Metadata{

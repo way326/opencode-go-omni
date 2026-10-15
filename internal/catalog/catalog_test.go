@@ -10,7 +10,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 
 	"opencode-go-cliproxyapi/internal/config"
 )
@@ -44,7 +44,7 @@ func testCfg() config.Config {
 		ModelPrefix:      config.ModelPrefix{Enabled: true, Value: "opencode-go"},
 		MaxResponseBytes: 1 << 20,
 		Catalog:          config.Catalog{StaleWhileUnavailable: true},
-		Protocols:        config.Protocols{ChatCompletions: true, Messages: true, Responses: true},
+		Protocols:        config.Protocols{ChatCompletions: true, Messages: true, Responses: true, Gemini: true},
 	}
 }
 
@@ -216,14 +216,18 @@ func TestCompatExactIDs(t *testing.T) {
 		"hy3":               RouteChatCompletions,
 		"hy4-preview":       RouteChatCompletions,
 		"longcat-2.0":       RouteChatCompletions,
+		// Chat Completions via the exact compatibility table: both IDs carry no
+		// provider.npm override in the models.dev opencode-go snapshot, so they
+		// inherit the provider default (@ai-sdk/openai-compatible) even though
+		// the rest of the qwen family overrides to @ai-sdk/anthropic.
+		"qwen3.7-max":  RouteChatCompletions,
+		"qwen3.6-plus": RouteChatCompletions,
 		// Messages.
 		"minimax-m3":   RouteMessages,
 		"minimax-m2.7": RouteMessages,
 		"minimax-m2.5": RouteMessages,
 		"qwen3.8-max":  RouteMessages,
-		"qwen3.7-max":  RouteMessages,
 		"qwen3.7-plus": RouteMessages,
-		"qwen3.6-plus": RouteMessages,
 	}
 	var sb strings.Builder
 	sb.WriteString(`{"data":[`)
@@ -644,7 +648,7 @@ func TestConcurrentRefreshAndReads(t *testing.T) {
 func TestProtocolFlagsExcludeRoutes(t *testing.T) {
 	catalogBody := `{"data":[
 		{"id":"glm-5.2"},
-		{"id":"qwen3.7-max"},
+		{"id":"qwen3.7-plus"},
 		{"id":"gpt-5.6-luna"}
 	]}`
 	routes := []struct {
@@ -654,9 +658,9 @@ func TestProtocolFlagsExcludeRoutes(t *testing.T) {
 		routableA string
 		routableB string
 	}{
-		{"chat-completions", func(p config.Protocols) bool { return p.ChatCompletions }, "glm-5.2", "qwen3.7-max", "gpt-5.6-luna"},
-		{"messages", func(p config.Protocols) bool { return p.Messages }, "qwen3.7-max", "glm-5.2", "gpt-5.6-luna"},
-		{"responses", func(p config.Protocols) bool { return p.Responses }, "gpt-5.6-luna", "glm-5.2", "qwen3.7-max"},
+		{"chat-completions", func(p config.Protocols) bool { return p.ChatCompletions }, "glm-5.2", "qwen3.7-plus", "gpt-5.6-luna"},
+		{"messages", func(p config.Protocols) bool { return p.Messages }, "qwen3.7-plus", "glm-5.2", "gpt-5.6-luna"},
+		{"responses", func(p config.Protocols) bool { return p.Responses }, "gpt-5.6-luna", "glm-5.2", "qwen3.7-plus"},
 	}
 	for _, tc := range routes {
 		t.Run(tc.protocol, func(t *testing.T) {

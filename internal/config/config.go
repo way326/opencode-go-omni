@@ -15,11 +15,27 @@ import (
 
 // Defaults (spec 04 §2/§4).
 const (
-	DefaultBaseURL          = "https://opencode.ai/zen/go/v1"
+	DefaultBaseURL          = "https://opencode.ai/inference/go/v1"
 	DefaultModelPrefix      = "opencode-go"
 	DefaultRefreshInterval  = 15 * time.Minute
 	DefaultRequestTimeout   = 5 * time.Minute
 	DefaultMaxResponseBytes = int64(67108864) // 64 MiB
+)
+
+// ProtocolGemini is the native Gemini protocol route name (spec 04 §4). The
+// catalog package derives its RouteGemini identifier from this value, so the
+// protocols.gemini switch and the routed records cannot drift apart.
+const (
+	ProtocolGemini = "gemini"
+	// GeminiModelPlaceholder keeps a route override's model template tied to
+	// the cataloged upstream ID instead of pinning a literal model name.
+	GeminiModelPlaceholder = "{model}"
+	// GeminiActionGenerate and GeminiActionStream are the only routable Gemini
+	// actions: the request's stream flag picks between the two, so no other
+	// action (countTokens, interactions, or a later PCS action) is a valid
+	// override value.
+	GeminiActionGenerate = "generateContent"
+	GeminiActionStream   = "streamGenerateContent"
 )
 
 type ModelPrefix struct {
@@ -40,11 +56,17 @@ type Protocols struct {
 	ChatCompletions bool
 	Messages        bool
 	Responses       bool
+	Gemini          bool
 }
 
+// RouteOverride pins one model to an explicit route (spec 04 §5). Endpoint is
+// required for the static routes; the Gemini route may instead build its
+// native path from the Model and Action templates.
 type RouteOverride struct {
 	Protocol string `yaml:"protocol"`
 	Endpoint string `yaml:"endpoint"`
+	Model    string `yaml:"model"`
+	Action   string `yaml:"action"`
 }
 
 type Config struct {
@@ -94,10 +116,11 @@ type rawProtocols struct {
 	ChatCompletions *bool `yaml:"chat-completions"`
 	Messages        *bool `yaml:"messages"`
 	Responses       *bool `yaml:"responses"`
+	Gemini          *bool `yaml:"gemini"`
 }
 
 var (
-	validProtocols = map[string]bool{"chat-completions": true, "messages": true, "responses": true}
+	validProtocols = map[string]bool{"chat-completions": true, "messages": true, "responses": true, ProtocolGemini: true}
 )
 
 // Load decodes YAML, expands ${VAR} references in api-key values only,
@@ -142,6 +165,7 @@ func Load(yamlBytes []byte) (Config, error) {
 			ChatCompletions: orDefault(raw.Protocols.ChatCompletions, true),
 			Messages:        orDefault(raw.Protocols.Messages, true),
 			Responses:       orDefault(raw.Protocols.Responses, true),
+			Gemini:          orDefault(raw.Protocols.Gemini, true),
 		},
 		RouteOverrides:   raw.RouteOverrides,
 		AllowHTTP:        raw.AllowHTTP,
@@ -201,6 +225,18 @@ func (c Config) validate() error {
 		if !validProtocols[o.Protocol] {
 			return fmt.Errorf("route-overrides[%s].protocol: unsupported protocol %q", name, o.Protocol)
 		}
+		if o.Protocol == ProtocolGemini {
+			if err := validateGeminiOverride(name, o); err != nil {
+				return err
+			}
+			continue
+		}
+		if o.Model != "" {
+			return fmt.Errorf("route-overrides[%s].model: only supported with protocol %q", name, ProtocolGemini)
+		}
+		if o.Action != "" {
+			return fmt.Errorf("route-overrides[%s].action: only supported with protocol %q", name, ProtocolGemini)
+		}
 		if o.Endpoint == "" {
 			return fmt.Errorf("route-overrides[%s].endpoint: must not be empty", name)
 		}
@@ -259,6 +295,63 @@ func validPrefix(s string) bool {
 		}
 	}
 	return true
+}
+
+// validateGeminiOverride checks the Gemini route's override shape (spec 04
+// §5). An override either names the path outright (endpoint, which the
+// catalog pins to the native /v1/models/<model>:<action> shape) or builds it
+// from the model and action templates, never both; the action template, when
+// present, must be one of the two routable actions. Every accepted form keeps
+// the request on the configured upstream authority — the catalog re-checks the
+// joined URL before a record becomes routable.
+func validateGeminiOverride(name string, o RouteOverride) error {
+	if o.Endpoint != "" {
+		if o.Model != "" || o.Action != "" {
+			return fmt.Errorf("route-overrides[%s].endpoint: must not be combined with model/action templates", name)
+		}
+		if !strings.HasPrefix(o.Endpoint, "/") {
+			return fmt.Errorf("route-overrides[%s].endpoint: must start with /", name)
+		}
+		if strings.ContainsAny(o.Endpoint, "?#") {
+			return fmt.Errorf("route-overrides[%s].endpoint: must not contain query or fragment separators", name)
+		}
+		return nil
+	}
+	if o.Model != "" && o.Model != GeminiModelPlaceholder && !validGeminiModelID(o.Model) {
+		return fmt.Errorf("route-overrides[%s].model: invalid gemini model id %q", name, o.Model)
+	}
+	if o.Action != "" && !IsGeminiAction(o.Action) {
+		return fmt.Errorf("route-overrides[%s].action: unsupported gemini action %q (use %s or %s)",
+			name, o.Action, GeminiActionGenerate, GeminiActionStream)
+	}
+	return nil
+}
+
+// validGeminiModelID accepts the model segment of the native Gemini path:
+// letters, digits, dot, underscore and hyphen only. Separators that would add
+// a path segment ('/', ':'), a query or fragment ('?', '#'), an authority
+// ('@'), or a percent escape ('%') are rejected, as are the dot-only
+// traversal names, so a model ID cannot rewrite the upstream URL.
+func validGeminiModelID(s string) bool {
+	if s == "" || strings.Trim(s, ".") == "" {
+		return false
+	}
+	for _, r := range s {
+		ok := r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' ||
+			r == '.' || r == '_' || r == '-'
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// IsGeminiAction reports whether name is one of the two routable Gemini
+// actions. The executor picks the effective action from the request's stream
+// flag, so an override may only name one of these two; anything else would
+// have to be routed by the adapter layer.
+func IsGeminiAction(name string) bool {
+	return name == GeminiActionGenerate || name == GeminiActionStream
 }
 
 func parseDuration(name string, p *string, def time.Duration) (time.Duration, error) {
