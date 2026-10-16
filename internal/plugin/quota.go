@@ -13,8 +13,8 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 
-	"opencode-go-cliproxyapi/internal/config"
-	"opencode-go-cliproxyapi/resources"
+	"github.com/way326/opencode-go-omni/internal/config"
+	"github.com/way326/opencode-go-omni/resources"
 )
 
 type quotaWindow struct {

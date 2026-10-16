@@ -13,9 +13,9 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 
-	"opencode-go-cliproxyapi/internal/catalog"
-	"opencode-go-cliproxyapi/internal/config"
-	"opencode-go-cliproxyapi/internal/errclass"
+	"github.com/way326/opencode-go-omni/internal/catalog"
+	"github.com/way326/opencode-go-omni/internal/config"
+	"github.com/way326/opencode-go-omni/internal/errclass"
 )
 
 // ProviderID is the single provider key served by this plugin (FR-001).
@@ -23,13 +23,13 @@ const ProviderID = "opencode-go"
 
 // pluginName / pluginVersion are reported in registration metadata.
 const (
-	pluginName    = "opencode-go-unified"
+	pluginName    = "opencode-go-omni"
 	pluginVersion = "0.2.1-dev"
 )
 
 // githubRepoURL satisfies the host's validPlugin gate (host.go
 // validPlugin rejects empty Metadata.GitHubRepository).
-const githubRepoURL = "https://github.com/massiveits/opencode-go-cliproxyapi"
+const githubRepoURL = "https://github.com/way326/opencode-go-omni"
 
 // registerRefreshTimeout bounds ONLY the synchronous initial/reconfigure
 // refreshOnce so a slow catalog cannot block host startup/reconfigure for a

@@ -1,6 +1,6 @@
-# OpenCode Go Unified CPA Plugin
+# OpenCode Go Omni CPA Plugin
 
-This local fork derives from [massiveits/opencode-go-cliproxyapi](https://github.com/massiveits/opencode-go-cliproxyapi), revision `a4369b9b1cf18a4111a0167e3b50e5d69054fe45` (plugin 0.1.10). Its plugin identity is **`opencode-go-unified`**, version **`0.2.1-dev`**. The upstream MIT license and attribution are retained.
+This local fork derives from [massiveits/opencode-go-cliproxyapi](https://github.com/massiveits/opencode-go-cliproxyapi), revision `a4369b9b1cf18a4111a0167e3b50e5d69054fe45` (plugin 0.1.10). Its plugin identity is **`opencode-go-omni`**, version **`0.2.1-dev`**. The upstream MIT license and attribution are retained.
 
 Version 0.2.1-dev restores the requested public model ID in Chat, Messages, and Responses response metadata, including streaming lifecycle events. An exact match to the upstream target is required; other reported model IDs remain unchanged so clients can still detect a mismatch. Tool payloads, signatures, usage and native Gemini model-version fields are preserved.
 
@@ -10,13 +10,17 @@ All requests use CPA host HTTP callbacks. Inference propagates `host_callback_id
 
 The original plugin and this fork must **not both be enabled**, because both claim the same provider. Install/enable and production acceptance are separate from building this deliverable. See [config.example.yaml](config.example.yaml) for a configuration fragment; it is not automatically applied.
 
-Authentication uses **OpenCode Go API keys**, configured under `plugins.configs.opencode-go-unified.api-keys`. The plugin does not implement browser OAuth. It no longer registers CPA's combined `AuthProvider` capability, which previously made CPA display an OAuth login card whose unsupported login handler returned HTTP 500. After installing this fix, refresh the management page; add or change subscription keys in the plugin configuration instead of using OAuth login.
+Authentication uses **OpenCode Go API keys**, configured under `plugins.configs.opencode-go-omni.api-keys`. The plugin does not implement browser OAuth. It no longer registers CPA's combined `AuthProvider` capability, which previously made CPA display an OAuth login card whose unsupported login handler returned HTTP 500. After installing this fix, refresh the management page; add or change subscription keys in the plugin configuration instead of using OAuth login.
 
 CPA's normal file credential loader continues to load plugin-generated files containing `"type": "opencode-go"`. The executor reads only the credential selected by CPA: historical `AuthAttributes.api_key`, then `AuthMetadata.api_key`, then the raw `StorageJSON` field. A present but invalid source is rejected, and the executor never substitutes the first configured key. Provider identity, four protocol routes, scheduling, and the quota page remain separate from OAuth login. The SDK's internal executor scope value `oauth` means credential-bound model registration here; it does not implement an OAuth exchange.
 
 If you manually imported a legacy file with only `"provider": "opencode-go"` and no `type`, back it up and migrate it to include `"type": "opencode-go"` before adopting this fix. Automatically generated files already include `type`. Verify account counts, disabled states, and model registration after replacement and after a later restart; the generic loader normally identifies accounts by filename. This source change and offline validation do not install or enable a new DLL in an existing CPA process.
 
 For isolated conversations, clients should send a stable unique `x-opencode-session` header on every turn. It takes precedence over CPA's canonical session metadata, then other recognized session headers, then the inherited first-user-turn content hash. The content-hash fallback cannot distinguish two independent conversations with the same opening message.
+
+Codex Multi-Agent V2 Responses input is normalized before upstream protocol routing: textual `agent_message` envelopes become ordinary user messages, retaining their ordered task content and attributed sender/recipient. Enable CPA's `client.codex.optimize-multi-agent-v2` and use fresh Codex sessions so the producer supplies plaintext task strings. A string stored under an agent part's `encrypted_content` field is copied under this plaintext contract; the plugin does not decrypt it. Recognized Fernet envelopes are rejected, but arbitrary ciphertext cannot be reliably distinguished without a trusted encoding marker. Other content types and unknown agent fields are rejected rather than silently dropped. Ordinary reasoning state, tool identities, session affinity and scheduling remain under the existing adapters and Codex runtime. Conversion support alone does not establish live V2 or Ultra proactive delegation support.
+
+Responses clients can return URL-backed images in `function_call_output` and `custom_tool_call_output` when using a Chat Completions upstream. The adapter retains a text tool receipt with the original call ID and supplies the full ordered result in an attributed user attachment, preserving image URLs (including base64 data URLs) and image detail. All results in a parallel tool batch must be paired before attachments are inserted. This bridge changes the image's carrier role; the selected upstream model must support image input, and live image recognition and the Codex `view_image` round trip require separate acceptance. File-ID-only images, file outputs, and image tool results on other cross-protocol routes are outside this fix.
 
 Native Gemini requests preserve opaque thought signatures and tool schemas; the plugin validates JSON and rewrites the model ID, then forwards the native fields without CPA's Gemini request normalizer. Upstream verifies the signatures. Native responses preserve `functionCall`, `functionResponse`, `thoughtSignature`, and other fields. Cross-format clients use CPA v8.0.28's translators and should retain signature/tool-call carrier fields on subsequent turns. Clients supply conversation history; the fork does not add server-side `previous_response_id` storage, explicit cache APIs, Interactions, or countTokens. Subscription-specific acceptance of native caching fields, tools, and multi-turn signature round trips still needs upstream acceptance testing.
 
@@ -73,6 +77,45 @@ or a remaining request count. Quota reset is unsupported. The native UI uses
 CPA's management authentication; only the standalone plugin page needs its
 existing remembered-management-password mechanism.
 
+## Stream completion and interrupted reasoning
+
+On the Chat Completions upstream route, synthesized Responses and Messages
+streams complete once a valid finish reason and its usage trailer have arrived;
+they do not wait for a redundant `[DONE]` after emitting their client terminal.
+A valid finish followed by EOF still flushes the terminal, while an incomplete
+trailing JSON/SSE line or EOF without a finish reason fails conversion rather
+than being reported as a successful synthesized reply. Native Chat passthrough
+keeps its existing clean-EOF policy and does not rewrite valid payload bytes.
+
+The opening request and the streaming pump each use `request-timeout` as a
+fixed time budget, not an idle timeout. Active output does not reset the pump
+budget. Stream cleanup has one outcome and one upstream close, including the
+watchdog; downstream completion is notified before upstream reclamation. Debug
+stream records include both stream IDs and the final reason.
+
+For recognized Codex HTTP Responses clients on the Chat Completions upstream
+route, a successful `response.completed` is held until converter finalization
+passes. One lifecycle owner then emits it as the final data-only SSE chunk,
+without an event line or trailing delimiter, immediately followed by normal
+downstream EOF. CPA v8.0.31 flushes this terminal in its EOF completion branch,
+avoiding the usage-accounting race when Codex closes after receiving it. Text,
+reasoning and tool deltas remain streamed; account selection and usage fields
+are preserved. Mid-stream cancellation, errors and timeouts remain failures.
+Length-limited replies retain their original `incomplete` terminal and framing.
+This compatibility behavior depends on CPA v8.0.31's Responses framer and must
+be retested after core upgrades. Unknown clients and other protocol routes
+retain their existing framing; WebSocket is outside this fix. Building a
+candidate does not install it or establish compatibility with every installed
+stream interceptor. No core or client configuration change is required.
+The first release recognizes the observed `Codex Desktop` headers and
+`codex_cli_rs` User-Agent; other identities retain legacy framing until tested.
+
+For DeepSeek Responses history, interrupted reasoning-only assistant turns use
+an explicit empty `content` string and retain their original `reasoning_content`.
+Tool-call turns keep their existing nullable content, and reasoning is never
+moved across user or tool-result boundaries. This is a request-structure fix;
+acceptance by the live upstream still requires a separately authorized test.
+
 ## Requirements
 
 - **CLIProxyAPI**: `v8.0.28` (the SDK version pinned by this fork)
@@ -84,29 +127,29 @@ Build the dynamic shared library for your platform:
 
 ### Windows (AMD64)
 ```powershell
-go build -buildmode=c-shared -o plugins/windows/amd64/opencode-go-unified.dll .
+go build -buildmode=c-shared -o plugins/windows/amd64/opencode-go-omni.dll .
 ```
 
 ### Linux (AMD64)
 ```bash
-go build -buildmode=c-shared -o plugins/linux/amd64/opencode-go-unified.so .
+go build -buildmode=c-shared -o plugins/linux/amd64/opencode-go-omni.so .
 ```
 
 ### macOS (ARM64)
 ```bash
-go build -buildmode=c-shared -o plugins/darwin/arm64/opencode-go-unified.dylib .
+go build -buildmode=c-shared -o plugins/darwin/arm64/opencode-go-omni.dylib .
 ```
 
 Place the compiled binary into your CLIProxyAPI plugin directory (e.g. `<cliproxyapi_root>/plugins/<os>/<arch>/`).
 
 ## Configuration
 
-Configure the plugin in your CLIProxyAPI `config.yaml` under `plugins.configs.opencode-go-unified`:
+Configure the plugin in your CLIProxyAPI `config.yaml` under `plugins.configs.opencode-go-omni`:
 
 ```yaml
 plugins:
   configs:
-    opencode-go-unified:
+    opencode-go-omni:
       # Upstream base URL (default: "https://opencode.ai/inference/go/v1")
       base-url: "https://opencode.ai/inference/go/v1"
 
@@ -164,7 +207,7 @@ plugins:
 | `protocols.responses` | `bool` | `true` | Protocol switch for Responses endpoints. |
 | `protocols.gemini` | `bool` | `true` | Protocol switch for native Gemini GenerateContent endpoints. |
 | `route-overrides` | `map` | `{}` | Map of model ID to `{ protocol: "...", endpoint: "..." }` overriding built-in family routing. Valid protocols: `chat-completions`, `messages`, `responses`, `gemini`. |
-| `request-timeout` | `duration` | `5m` | Upstream HTTP request timeout. Must be positive. |
+| `request-timeout` | `duration` | `5m` | Fixed timeout for opening an upstream request and, separately, the streaming pump; not reset by activity. Must be positive. |
 | `max-response-bytes` | `int64` | `67108864` (64 MiB) | Maximum non-streaming response body size in bytes. |
 | `allow-http` | `bool` | `false` | When `true`, permits `http://` scheme in `base-url` / `catalog-url` for local testing. |
 

@@ -1,4 +1,4 @@
-module opencode-go-cliproxyapi
+module github.com/way326/opencode-go-omni
 
 go 1.26.7
 

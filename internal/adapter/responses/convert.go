@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"opencode-go-cliproxyapi/internal/adapter/shared"
-	"opencode-go-cliproxyapi/internal/errclass"
+	"github.com/way326/opencode-go-omni/internal/adapter/shared"
+	"github.com/way326/opencode-go-omni/internal/errclass"
 )
 
 // ---- upstream Responses result shapes (decode-only) ----

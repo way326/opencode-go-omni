@@ -10,8 +10,8 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 
-	"opencode-go-cliproxyapi/internal/config"
-	"opencode-go-cliproxyapi/resources"
+	"github.com/way326/opencode-go-omni/internal/config"
+	"github.com/way326/opencode-go-omni/resources"
 )
 
 func TestManagementRegistration(t *testing.T) {
@@ -152,7 +152,7 @@ func TestQuotaPageIsStaticAndSecretFree(t *testing.T) {
 func TestQuotaPageUsesManualSessionCache(t *testing.T) {
 	page := resources.QuotaPage
 	for _, marker := range []string{
-		`const storageKey = "opencode-go-unified:quota"`,
+		`const storageKey = "opencode-go-omni:quota"`,
 		"sessionStorage.getItem(storageKey)",
 		"sessionStorage.setItem(storageKey, JSON.stringify(cache))",
 		"JSON.parse(stored)",

@@ -11,7 +11,7 @@ permissions:
   contents: write
 
 env:
-  PLUGIN_ID: opencode-go-unified
+  PLUGIN_ID: opencode-go-omni
 
 jobs:
   test:

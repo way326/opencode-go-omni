@@ -1,3 +1,65 @@
+## Unreleased: Codex Responses terminal delivery at EOF
+
+- On the Chat upstream route, hold a recognized Codex HTTP Responses success
+  terminal until Finish validation passes, then send the original terminal JSON
+  as the last data-only chunk and close downstream normally. Preserve all
+  incremental events, output items, usage fields and account scheduling.
+- Give terminal commit and watchdog/error cleanup one owner. A failed terminal
+  emit closes with an error; it is never logged as a successful commit. Reject
+  duplicate terminals and invalid data already received after completion.
+- Preserve the original terminal and framing for length-limited `incomplete`
+  replies and other non-success terminal events; do not turn them into success
+  or a new transport error.
+- Keep other clients, WebSocket and other upstream protocols outside this
+  workaround. It relies on CPA v8.0.31 EOF framing behavior and requires
+  compatibility checks after core upgrades. Genuine cancellation and the
+  existing five-minute request-timeout policy are unchanged.
+- Source and debug DLL acceptance do not install or hot-reload the plugin.
+
+## Unreleased: stream lifecycle and interrupted reasoning
+
+- Stop synthesized Chat-to-Responses and Chat-to-Messages streams after a valid
+  finish reason and usage trailer, with terminal events and usage delivered once.
+  Keep finish-plus-EOF compatibility; reject incomplete trailing frames and
+  synthesized responses that end without a finish reason.
+- Give the pump and watchdog one close outcome, track watchdog work through
+  shutdown, and notify downstream completion before reclaiming the upstream.
+  Apply the same tracked upstream cleanup to streaming HTTP error bootstraps.
+- Keep DeepSeek reasoning-only history as an assistant turn with explicit empty
+  content instead of null; retain reasoning text, turn boundaries, and nullable
+  content on actual tool-call turns.
+- Preserve the configured timeout and native Chat clean-EOF behavior. These
+  lifecycle changes alone do not fix CPA core's independent 499 usage race;
+  the scoped EOF compatibility behavior above addresses terminal delivery.
+  Building and offline acceptance do not install or hot-reload a live plugin.
+
+## Unreleased: Codex Multi-Agent V2 plaintext input compatibility
+
+- Normalize textual Responses `agent_message` items once at the shared executor
+  boundary before routing to Chat, Messages, Responses or Gemini. Preserve task
+  text, ordering and attributed source without forwarding private envelope fields.
+- Consume CPA's optimized plaintext task contract; do not decrypt opaque history.
+  Reject recognized Fernet envelopes, malformed or unsupported agent content
+  before inference. Generic ciphertext detection is not guaranteed.
+- Preserve effective Payload precedence, original request metadata, ordinary
+  reasoning handling, tool identity and the existing image-result bridge.
+- Keep Codex scheduling and lifecycle unchanged. Live V2 and Ultra behavior
+  require separate end-to-end acceptance; offline conversion is not that proof.
+
+## Unreleased: image tool results on the Responses-to-Chat route
+
+- Bridge image-bearing `function_call_output` and `custom_tool_call_output`
+  results to an attributed user attachment while retaining their text tool
+  receipts and call IDs. Preserve ordered text/image content, base64 or remote
+  image URLs, and image detail.
+- Complete parallel tool-result batches before adding attachments; reject
+  incomplete or ambiguous image-result pairing without sending an inference
+  request. Existing text-only tool-result behavior is preserved.
+- Keep the shared text-only decoder and other protocol routes unchanged.
+  File-ID-only images and file outputs remain unsupported on this bridge.
+  Offline verification does not establish upstream vision capability or a
+  successful live Codex `view_image` round trip; installation is separate.
+
 ## Unreleased: native OpenCode Go quota support
 
 - Register CPA's standard `QuotaProvider` for `opencode-go`, enabling native
@@ -19,7 +81,10 @@
 - Preserve the 0.2.1-dev response model metadata fix and all four protocol routes. Legacy manual files with only `provider` and no `type` require an explicit migration before replacement.
 - These are local source changes with offline acceptance; installation and live management-page verification remain separate steps.
 
-Full OpenAI Codex CLI support across all models: multi-agent namespaces, custom programmatic tools (`exec`), tool call results, and reasoning efforts are fully functional.
+OpenAI Codex CLI translation supports tool namespaces, custom programmatic
+tools (`exec`), text tool results, and reasoning controls. Supported image tool
+results depend on the protocol route described above; model presence and
+offline conversion tests do not establish every upstream model's capabilities.
 
 ### Bug Fixes
 

@@ -7,7 +7,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 
-	"opencode-go-cliproxyapi/internal/config"
+	"github.com/way326/opencode-go-omni/internal/config"
 )
 
 // currentCatalogModel is one ID from the current OpenCode Go catalog with the

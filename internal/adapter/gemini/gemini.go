@@ -69,8 +69,8 @@ import (
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	_ "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator/builtin"
 
-	"opencode-go-cliproxyapi/internal/adapter/shared"
-	"opencode-go-cliproxyapi/internal/errclass"
+	"github.com/way326/opencode-go-omni/internal/adapter/shared"
+	"github.com/way326/opencode-go-omni/internal/errclass"
 )
 
 // Format labels of the client protocols served by this route. They match the

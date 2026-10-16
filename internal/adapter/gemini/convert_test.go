@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"opencode-go-cliproxyapi/internal/errclass"
+	"github.com/way326/opencode-go-omni/internal/errclass"
 )
 
 // nonStreamResult is one upstream Gemini generateContent result carrying a

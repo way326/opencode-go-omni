@@ -10,8 +10,8 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
-	"opencode-go-cliproxyapi/internal/catalog"
-	"opencode-go-cliproxyapi/internal/config"
+	"github.com/way326/opencode-go-omni/internal/catalog"
+	"github.com/way326/opencode-go-omni/internal/config"
 )
 
 const geminiModel = "gemini-4-argon-contributor"

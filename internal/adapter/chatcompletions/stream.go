@@ -6,8 +6,8 @@ import (
 	"strconv"
 	"strings"
 
-	"opencode-go-cliproxyapi/internal/adapter/shared"
-	"opencode-go-cliproxyapi/internal/errclass"
+	"github.com/way326/opencode-go-omni/internal/adapter/shared"
+	"github.com/way326/opencode-go-omni/internal/errclass"
 )
 
 // StreamConverter incrementally converts an upstream Chat Completions
@@ -18,12 +18,14 @@ import (
 // accumulated per tool_calls index until the stream terminates.
 //
 // A converter is safe for SEQUENTIAL Feed calls only — it is not
-// goroutine-safe; use one converter per upstream stream. Synthesis
-// follows choices[0] (upstream serves n=1 routes).
+// goroutine-safe; use one converter per upstream stream. Feed reports done
+// as soon as the client terminal is complete; Finish owns the EOF seams
+// (truncation validation and a still-held terminal). Synthesis follows
+// choices[0] (upstream serves n=1 routes).
 type StreamConverter struct {
 	sourceFormat string
 	lineBuf      []byte // partial SSE line carried across Feed calls
-	done         bool
+	done         bool   // client terminal delivered: [DONE]/usage trailer, so Feed stops the caller
 
 	started        bool // message_start / first chunk seen
 	id             string
@@ -41,9 +43,11 @@ type StreamConverter struct {
 	toolsSeen      bool    // any tool_calls entry observed (terminal-reason precedence)
 	usage          *ccUsage
 	finished       bool            // finish_reason processed
-	heldFinish     string          // finish_reason awaiting terminal emission (flushed on the next data line or [DONE], so the standard include_usage trailer lands in the terminal event; Flush covers close-without-[DONE])
-	terminalSent   bool            // claudeTerminal already emitted message_delta (Flush must still close with message_stop)
-	flushed        bool            // Flush already ran (one-shot guard)
+	finishCalled   bool            // Finish already ran (one-shot guard)
+	finishErr      *errclass.Error // cached Finish failure so repeat calls stay idempotent
+	heldFinish     string          // finish_reason awaiting terminal emission (flushed on the next data line or [DONE], so the standard include_usage trailer lands in the terminal event; Finish covers close-without-[DONE])
+	terminalSent   bool            // claudeTerminal already emitted message_delta (Finish must still close with message_stop)
+	flushed        bool            // Flush/Finish already rendered the one-shot terminal seam
 	respText       strings.Builder // openai-response accumulated output_text
 	reasoningText  strings.Builder
 	respTools      *shared.ResponseTools
@@ -78,7 +82,7 @@ func NewStreamConverter(sourceFormat string, tools ...*shared.ResponseTools) *St
 
 // Feed consumes one upstream chunk (any split of the byte stream),
 // returning the client-protocol events completed by this chunk, whether
-// the stream is done ([DONE] seen), and a classified error for
+// the stream is done (sentinel or full client terminal), and a classified error for
 // malformed chunks (FR-006). Errors carry at most an 80-character
 // redacted snippet — never the full upstream body.
 func (sc *StreamConverter) Feed(chunk []byte) (events [][]byte, done bool, eErr *errclass.Error) {
@@ -115,18 +119,154 @@ func (sc *StreamConverter) handleLine(line string) ([][]byte, *errclass.Error) {
 	}
 }
 
-// Flush terminates a stream whose upstream closed without [DONE]: the
-// finish_reason chunk may legally be the last data line before close, and
-// without this the client never sees message_delta/message_stop or
-// response.completed — nor usage stranded behind the deferred terminal
-// (FR-006). Claude synthesis appends message_stop after the held
-// message_delta; Responses synthesis emits response.completed. One-shot:
-// later calls return nothing, as does any call with no pending terminal.
+// Flush is the close-without-[DONE] compatibility seam: it renders whichever
+// terminal is still held, without validating whether the upstream really
+// reached one (Finish owns that check for the executor). Claude synthesis
+// appends message_stop after the held message_delta; Responses synthesis
+// emits response.completed. One-shot: later calls return nothing, as does
+// any call with no pending terminal or on an already-completed stream.
 func (sc *StreamConverter) Flush() [][]byte {
 	if sc.flushed {
 		return nil
 	}
 	sc.flushed = true
+	return sc.heldTerminal()
+}
+
+// Finish ends an upstream stream that closed without [DONE] (FR-006): it
+// translates a final line that arrived without its trailing newline, renders
+// the terminal still held at EOF, and validates that the stream actually
+// reached one. Without that check a truncated upstream — a half-written
+// chunk, or a close before any finish_reason — would be reported as a
+// successful stream even though the client never received a truthful
+// terminal (claude: no message_delta; Responses: no response.completed).
+// One-shot and idempotent: repeat calls return the same verdict.
+func (sc *StreamConverter) Finish() ([][]byte, *errclass.Error) {
+	if sc.finishCalled {
+		return nil, sc.finishErr
+	}
+	sc.finishCalled = true
+	sc.flushed = true // Finish supersedes the Flush seam: no terminal renders twice
+
+	var events [][]byte
+	if !sc.done {
+		// A legal stream may close right after its last data line without a
+		// trailing newline, so the leftover fragment is translated as that
+		// final line; a fragment that never formed a complete data payload
+		// is a truncated upstream stream.
+		if tail := sc.takeTail(); tail != "" {
+			ev, eErr := sc.finishTail(tail)
+			if eErr != nil {
+				sc.finishErr = eErr
+				return nil, eErr
+			}
+			events = append(events, ev...)
+		}
+	}
+	if eErr := sc.missingTerminal(); eErr != nil {
+		sc.finishErr = eErr
+		return nil, eErr
+	}
+	events = append(events, sc.heldTerminal()...)
+	sc.done = true
+	return events, nil
+}
+
+// ValidateTerminalTail checks bytes Feed already received after a terminal.
+// The Codex EOF commit path calls this before publishing success; other
+// clients retain their existing completion policy. A single optional [DONE]
+// and frame whitespace are legal, but more data must not be silently dropped.
+// No further upstream read is needed or performed here.
+func (sc *StreamConverter) ValidateTerminalTail() *errclass.Error {
+	if !sc.done {
+		return nil
+	}
+	seenDone := false
+	for _, line := range strings.Split(string(sc.lineBuf), "\n") {
+		line = strings.TrimSuffix(line, "\r")
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		data, ok := sseData(line)
+		if !ok || !shared.IsSSEDone(data) || seenDone {
+			return errclass.Translation("unexpected data after Chat Completions terminal")
+		}
+		seenDone = true
+	}
+	return nil
+}
+
+// takeTail removes the final line that arrived without its trailing newline.
+// Blank leftovers (a bare "\r", whitespace) are dropped: they are the tail of
+// a frame separator, not a payload.
+func (sc *StreamConverter) takeTail() string {
+	tail := strings.TrimSuffix(string(sc.lineBuf), "\r")
+	sc.lineBuf = nil
+	if strings.TrimSpace(tail) == "" {
+		return ""
+	}
+	return tail
+}
+
+// finishTail translates the unterminated final line. A complete data payload
+// is consumed exactly as Feed would have consumed it — passthrough bytes are
+// forwarded untouched, synthesized formats go through their line handler —
+// while any fragment that is not a complete data payload (an unterminated
+// field line, half-written JSON) is a truncated stream, never a silent EOF.
+func (sc *StreamConverter) finishTail(line string) ([][]byte, *errclass.Error) {
+	data, ok := sseData(line)
+	if !ok {
+		return nil, errclass.UpstreamFallback(
+			"chat completions stream ended with an unterminated SSE line (truncated upstream stream)")
+	}
+	if data == "" {
+		return nil, nil
+	}
+	if shared.IsSSEDone(data) {
+		return sc.sseDoneEvents(), nil
+	}
+	if sc.sourceFormat == "openai" {
+		if !json.Valid([]byte(data)) {
+			return nil, errclass.Translation(
+				"malformed Chat Completions stream chunk: " + shared.RedactedSnippet(data))
+		}
+		return [][]byte{[]byte(data)}, nil
+	}
+	return sc.handleLine(line)
+}
+
+// sseDoneEvents renders the client terminal for an upstream [DONE]: claude
+// closes its blocks and delivers message_delta plus message_stop, Responses
+// renders response.completed, passthrough emits nothing (the endpoint writes
+// the trailing [DONE] itself). A [DONE] that arrives after the client
+// terminal was already delivered adds nothing.
+func (sc *StreamConverter) sseDoneEvents() [][]byte {
+	if sc.done {
+		return nil
+	}
+	sc.done = true
+	switch sc.sourceFormat {
+	case "claude":
+		events := sc.stopBlocks()
+		events = append(events, sc.claudeTerminal()...)
+		return append(events, sc.claudeEm.MessageStop())
+	case "openai-response":
+		return sc.responsesTerminal()
+	default:
+		return nil
+	}
+}
+
+// heldTerminal renders the terminal still held at the end of a stream
+// exactly once: claude delivers the deferred message_delta (with
+// message_stop so Anthropic clients stop waiting), Responses delivers
+// response.completed. Nothing renders for passthrough frames or once the
+// client terminal was already delivered (a [DONE], the include_usage
+// trailer, or an earlier Flush/Finish).
+func (sc *StreamConverter) heldTerminal() [][]byte {
+	if sc.done {
+		return nil
+	}
 	switch sc.sourceFormat {
 	case "claude":
 		events := sc.claudeTerminal()
@@ -144,6 +284,23 @@ func (sc *StreamConverter) Flush() [][]byte {
 		return sc.responsesTerminal()
 	default:
 		return nil
+	}
+}
+
+// missingTerminal classifies a stream that ended before any finish_reason
+// arrived: neither synthesized target can render a truthful terminal without
+// it, so a clean-looking EOF is a truncated upstream stream, not a success.
+// Passthrough frames synthesize nothing (the endpoint owns the trailing
+// [DONE]), so only the tail check applies to them.
+func (sc *StreamConverter) missingTerminal() *errclass.Error {
+	if sc.sourceFormat == "openai" || sc.finished {
+		return nil
+	}
+	return &errclass.Error{
+		Class:      errclass.ClassUpstream,
+		Message:    "chat completions stream ended before any finish_reason (truncated upstream stream)",
+		StatusCode: 502,
+		Retryable:  !sc.started,
 	}
 }
 
@@ -174,8 +331,7 @@ func (sc *StreamConverter) passthroughLine(line string) [][]byte {
 		return nil
 	}
 	if shared.IsSSEDone(data) {
-		sc.done = true
-		return nil
+		return sc.sseDoneEvents()
 	}
 	if data == "" {
 		return nil
@@ -272,6 +428,25 @@ func chunkError(e *ccChunkError) *errclass.Error {
 	return errclass.UpstreamFallback(e.Message)
 }
 
+// defersTerminal reports whether a post-finish chunk must leave the deferred
+// terminal pending. A choice-less frame that carries no usage is only an
+// accounting frame: the standard include_usage trailer may still be in
+// flight, and releasing the terminal there would drop its counts (F6). Every
+// other frame either carries state (content, tools, a repeat finish) or the
+// counts themselves, so the terminal is rendered on it.
+func defersTerminal(chunk *ccChunk) bool {
+	return len(chunk.Choices) == 0 && chunk.Usage == nil
+}
+
+// completesTerminal reports whether the chunk that released the deferred
+// terminal carried the stream's final counts — the standard choice-less
+// include_usage trailer. Only then is the client terminal complete, so only
+// then may synthesis report done and let the caller stop reading instead of
+// waiting for a [DONE] the upstream may never send.
+func completesTerminal(chunk *ccChunk) bool {
+	return len(chunk.Choices) == 0 && chunk.Usage != nil
+}
+
 // ---- Chat Completions -> claude (Anthropic Messages) stream (FR-006) ----
 
 // claudeLine synthesizes Messages events from one chunk: the first
@@ -283,28 +458,34 @@ func chunkError(e *ccChunkError) *errclass.Error {
 // blocks and stream input_json_delta, finish_reason closes blocks and
 // holds message_delta with the mapped stop reason until the next data
 // line or [DONE] (OpenAI's standard include_usage trailer follows the
-// finish_reason chunk and must land in the terminal event), and [DONE]
-// emits message_stop.
+// finish_reason chunk and must land in the terminal event); the
+// include_usage trailer itself completes the stream — message_delta plus
+// message_stop in one batch with done reported — and [DONE] emits
+// message_stop.
 func (sc *StreamConverter) claudeLine(line string) ([][]byte, *errclass.Error) {
 	data, ok := sseData(line)
 	if !ok || data == "" {
 		return nil, nil
 	}
 	if shared.IsSSEDone(data) {
-		sc.done = true
-		events := sc.stopBlocks()
-		events = append(events, sc.claudeTerminal()...)
-		return append(events, sc.claudeEm.MessageStop()), nil
+		return sc.sseDoneEvents(), nil
 	}
 	chunk, eErr := sc.decodeChunk(data)
 	if eErr != nil {
 		return nil, eErr
 	}
 	var events [][]byte
-	if sc.heldFinish != "" {
+	if sc.heldFinish != "" && !defersTerminal(chunk) {
 		// A post-finish chunk (typically the include_usage trailer)
 		// flushes the deferred terminal so it carries the final counts.
 		events = append(events, sc.claudeTerminal()...)
+		if completesTerminal(chunk) {
+			// The trailer's counts are in the terminal, so the Messages
+			// stream is complete: close it here and report done instead of
+			// waiting for a [DONE] the upstream may never send.
+			sc.done = true
+			events = append(events, sc.claudeEm.MessageStop())
+		}
 	}
 	if !sc.started && len(chunk.Choices) > 0 {
 		sc.started = true
@@ -424,25 +605,31 @@ func (sc *StreamConverter) stopBlocks() [][]byte {
 // finish_reason holds response.completed — emitted at the next data
 // line or [DONE] with prompt/completion tokens mapped to input/output
 // usage (the standard include_usage trailer follows the finish_reason
-// chunk); [DONE] terminates the stream.
+// chunk); the trailer's own batch completes the stream and reports done,
+// and [DONE] terminates the stream.
 func (sc *StreamConverter) responsesLine(line string) ([][]byte, *errclass.Error) {
 	data, ok := sseData(line)
 	if !ok || data == "" {
 		return nil, nil
 	}
 	if shared.IsSSEDone(data) {
-		sc.done = true
-		return sc.responsesTerminal(), nil
+		return sc.sseDoneEvents(), nil
 	}
 	chunk, eErr := sc.decodeChunk(data)
 	if eErr != nil {
 		return nil, eErr
 	}
 	var events [][]byte
-	if sc.heldFinish != "" {
+	if sc.heldFinish != "" && !defersTerminal(chunk) {
 		// A post-finish chunk (typically the include_usage trailer)
 		// flushes the deferred terminal so it carries the final counts.
 		events = append(events, sc.responsesTerminal()...)
+		if completesTerminal(chunk) {
+			// The trailer's counts made response.completed complete, so the
+			// Responses stream is over: report done instead of waiting for
+			// a [DONE] the upstream may never send.
+			sc.done = true
+		}
 	}
 	if !sc.started && len(chunk.Choices) > 0 {
 		sc.started = true

@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"opencode-go-cliproxyapi/internal/adapter/shared"
-	"opencode-go-cliproxyapi/internal/errclass"
+	"github.com/way326/opencode-go-omni/internal/adapter/shared"
+	"github.com/way326/opencode-go-omni/internal/errclass"
 )
 
 type sseEvt struct {
@@ -1026,7 +1026,7 @@ func TestStreamConverterFlushAfterFinishWithoutDONE(t *testing.T) {
 			t.Fatalf("flush without finish_reason must return nothing: %v", evs)
 		}
 	})
-	t.Run("claude post-finish usage trailer then close-without-DONE still emits message_stop once", func(t *testing.T) {
+	t.Run("claude post-finish usage trailer completes the stream once", func(t *testing.T) {
 		sc := NewStreamConverter("claude")
 		var deltaCount, stopCount int
 		for _, ev := range feedAll(t, sc,
@@ -1045,15 +1045,17 @@ func TestStreamConverterFlushAfterFinishWithoutDONE(t *testing.T) {
 				stopCount++
 			}
 		}
-		if deltaCount != 1 || stopCount != 0 {
-			t.Fatalf("trailer must deliver exactly one message_delta and no message_stop: delta=%d stop=%d", deltaCount, stopCount)
+		// The trailer is the stream's last state-bearing frame: message_delta
+		// (with the counts) plus message_stop, so the caller can stop reading
+		// instead of waiting for a [DONE] the upstream may never send.
+		if deltaCount != 1 || stopCount != 1 {
+			t.Fatalf("trailer must complete the stream exactly once: delta=%d stop=%d", deltaCount, stopCount)
 		}
-		flushed := parseEvents(t, sc.Flush())
-		if len(flushed) != 1 || flushed[0].Name != "message_stop" {
-			t.Fatalf("flush after delivered terminal = %v, want lone message_stop", flushed)
+		if evs, eErr := sc.Finish(); eErr != nil || len(evs) != 0 {
+			t.Fatalf("Finish after a completed stream = %v, err=%v", evs, eErr)
 		}
-		if again := sc.Flush(); len(again) != 0 {
-			t.Fatalf("second flush must return nothing: %v", again)
+		if flushed := sc.Flush(); len(flushed) != 0 {
+			t.Fatalf("flush after a completed stream must return nothing: %v", flushed)
 		}
 	})
 }

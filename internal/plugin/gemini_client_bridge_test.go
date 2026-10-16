@@ -14,8 +14,8 @@ import (
 
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 
-	"opencode-go-cliproxyapi/internal/catalog"
-	"opencode-go-cliproxyapi/internal/errclass"
+	"github.com/way326/opencode-go-omni/internal/catalog"
+	"github.com/way326/opencode-go-omni/internal/errclass"
 )
 
 const geminiClientUpstreamModel = "glm-5.3"

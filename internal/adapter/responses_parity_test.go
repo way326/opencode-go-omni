@@ -8,10 +8,10 @@ import (
 	"strings"
 	"testing"
 
-	"opencode-go-cliproxyapi/internal/adapter/chatcompletions"
-	"opencode-go-cliproxyapi/internal/adapter/messages"
-	"opencode-go-cliproxyapi/internal/adapter/responses"
-	"opencode-go-cliproxyapi/internal/errclass"
+	"github.com/way326/opencode-go-omni/internal/adapter/chatcompletions"
+	"github.com/way326/opencode-go-omni/internal/adapter/messages"
+	"github.com/way326/opencode-go-omni/internal/adapter/responses"
+	"github.com/way326/opencode-go-omni/internal/errclass"
 )
 
 type feeder interface {
