@@ -1,4 +1,8 @@
-## Unreleased: Codex Responses terminal delivery at EOF
+# Release Notes
+
+## 0.2.1 - 2026-10-16
+
+### Codex Responses terminal delivery at EOF
 
 - On the Chat upstream route, hold a recognized Codex HTTP Responses success
   terminal until Finish validation passes, then send the original terminal JSON
@@ -16,7 +20,7 @@
   existing five-minute request-timeout policy are unchanged.
 - Source and debug DLL acceptance do not install or hot-reload the plugin.
 
-## Unreleased: stream lifecycle and interrupted reasoning
+### Stream lifecycle and interrupted reasoning
 
 - Stop synthesized Chat-to-Responses and Chat-to-Messages streams after a valid
   finish reason and usage trailer, with terminal events and usage delivered once.
@@ -33,7 +37,7 @@
   the scoped EOF compatibility behavior above addresses terminal delivery.
   Building and offline acceptance do not install or hot-reload a live plugin.
 
-## Unreleased: Codex Multi-Agent V2 plaintext input compatibility
+### Codex Multi-Agent V2 plaintext input compatibility
 
 - Normalize textual Responses `agent_message` items once at the shared executor
   boundary before routing to Chat, Messages, Responses or Gemini. Preserve task
@@ -46,7 +50,7 @@
 - Keep Codex scheduling and lifecycle unchanged. Live V2 and Ultra behavior
   require separate end-to-end acceptance; offline conversion is not that proof.
 
-## Unreleased: image tool results on the Responses-to-Chat route
+### Image tool results on the Responses-to-Chat route
 
 - Bridge image-bearing `function_call_output` and `custom_tool_call_output`
   results to an attributed user attachment while retaining their text tool
@@ -60,7 +64,7 @@
   Offline verification does not establish upstream vision capability or a
   successful live Codex `view_image` round trip; installation is separate.
 
-## Unreleased: native OpenCode Go quota support
+### Native OpenCode Go quota support
 
 - Register CPA's standard `QuotaProvider` for `opencode-go`, enabling native
   Management Center quota discovery without changing or rebuilding CPA core.
@@ -72,9 +76,9 @@
   is explicitly unsupported; no inference calls or background quota polling are
   introduced.
 
-## What's Changed
+### Earlier changes included in this release
 
-### Local development: API-key authentication without a false OAuth entry
+#### API-key authentication without a false OAuth entry
 
 - Stop advertising the combined `AuthProvider` capability that made CPA v8.0.28 offer an unsupported browser login and return HTTP 500. OpenCode Go remains an API-key provider; refresh the management page after installing the fix.
 - Keep plugin-generated `type: opencode-go` credentials in CPA's scheduling pool. Read the selected key from attributes, metadata, or persisted JSON, without falling back to another configured key.
@@ -86,7 +90,7 @@ tools (`exec`), text tool results, and reasoning controls. Supported image tool
 results depend on the protocol route described above; model presence and
 offline conversion tests do not establish every upstream model's capabilities.
 
-### Bug Fixes
+#### Bug fixes
 
 - Fix missing Responses stream item lifecycle completion events (output_text.done, content_part.done, function_call_arguments.done, output_item.done) prior to response.completed, resolving dropped assistant output and tool calls in OpenAI Codex CLI and strict Responses clients.
 - Fix handling of in-history messages with role: "system" across protocol adapters without rejecting them as unsupported roles or forwarding invalid turn roles to upstream providers that require alternating user/assistant turns.
