@@ -79,6 +79,11 @@ func prepareUpstreamRequest(res *resolvedExecution, req executorRequest) ([]byte
 	if len(res.original) == 0 {
 		res.original = body
 	}
+	var normalizeErr *errclass.Error
+	body, normalizeErr = normalizeCodexV2Input(req.SourceFormat, body)
+	if normalizeErr != nil {
+		return nil, normalizeErr
+	}
 	if res.rec.Protocol == catalog.RouteGemini && res.rec.EndpointPath != "" {
 		// A model/endpoint override controls the actual upstream model. Keep
 		// the body model and translation metadata aligned with that path.

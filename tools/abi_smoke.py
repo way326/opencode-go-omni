@@ -46,6 +46,7 @@ def main(path):
     quota_callback = "callback-quota-offline"
     quota_reset_at = "2026-10-15T12:00:00Z"
     quota_seen = []
+    v2_seen = []
     response = {"candidates": [{"index": 0, "content": {"role": "model", "parts": [{"text": "offline OK", "thoughtSignature": "AQID"}]}, "finishReason": "STOP"}], "usageMetadata": {"promptTokenCount": 2, "candidatesTokenCount": 1, "totalTokenCount": 3}}
     wire = ("data: " + json.dumps(response, separators=(",", ":")) + "\r\n\r\n").encode()
     chunks = []
@@ -90,6 +91,12 @@ def main(path):
                 assert "x-goog-api-key" not in headers
                 assert headers["x-opencode-session"] == ["offline-session-A"]
                 assert "contents" in json.loads(base64.b64decode(req["body"]))
+                upstream_body = json.loads(base64.b64decode(req["body"]))
+                if "V2-ABI-TASK-391" in json.dumps(upstream_body):
+                    assert "agent_message" not in json.dumps(upstream_body)
+                    assert "encrypted_content" not in json.dumps(upstream_body)
+                    assert "/root/abi-worker" in json.dumps(upstream_body)
+                    v2_seen.append(upstream_body)
                 chunks[:] = [wire[:5], wire[5:17], wire[17:]]
                 result = {"status_code": 200, "headers": {"Content-Type": ["text/event-stream"]}, "stream_id": "up-offline"}
             elif method == "host.http.stream_read":
@@ -208,13 +215,28 @@ def main(path):
             assert any(b"thoughtSignature" in chunk for chunk in emitted)
             assert any(b"usageMetadata" in chunk for chunk in emitted)
             stream_chunks += len(emitted)
+        # Exercise the real compiled V2 normalizer through C ABI and a fake host.
+        v2_body = b64(json.dumps({"input": [{"type": "agent_message", "author": "/root", "recipient": "/root/abi-worker", "content": [{"type": "input_text", "text": "Message Type: NEW_TASK\nPayload:\n"}, {"type": "encrypted_content", "encrypted_content": "V2-ABI-TASK-391"}]}]}))
+        closed.clear()
+        emitted.clear()
+        request = {"AuthProvider": "opencode-go", "AuthAttributes": {"api_key": key}, "Model": "opencode-go/" + model, "SourceFormat": "openai-response", "Format": "gemini", "Stream": True, "OriginalRequest": v2_body, "Payload": v2_body, "Headers": {"X-Opencode-Session": ["offline-session-A"]}, "stream_id": "down-v2", "host_callback_id": "callback-offline"}
+        invoke("executor.execute_stream", request)
+        assert closed.wait(15), "V2 DLL stream timed out"
+        assert len(v2_seen) == 1 and emitted, "V2 task did not reach fake host"
+        opaque = base64.urlsafe_b64encode(bytes([128]) + bytes(72)).decode()
+        bad_body = b64(json.dumps({"input": [{"type": "agent_message", "content": [{"type": "encrypted_content", "encrypted_content": opaque}]}]}))
+        request["Payload"] = request["OriginalRequest"] = bad_body
+        upstream_calls = calls.count("host.http.do_stream")
+        opaque_error = invoke("executor.execute_stream", request, expect_error=True)
+        assert "opaque encrypted task" in opaque_error.get("message", ""), opaque_error
+        assert calls.count("host.http.do_stream") == upstream_calls, "opaque V2 task reached inference"
         request = {"AuthProvider": "opencode-go", "Model": "opencode-go/" + model, "SourceFormat": "gemini", "Format": "gemini", "Stream": True, "OriginalRequest": body, "Payload": body, "stream_id": "down-missing"}
         upstream_calls = calls.count("host.http.do_stream")
         missing_error = invoke("executor.execute_stream", request, expect_error=True)
         assert calls.count("host.http.do_stream") == upstream_calls, "missing credential contacted upstream"
         assert key not in json.dumps(missing_error) and configured_key not in json.dumps(missing_error)
         assert not failures, failures
-        print(json.dumps({"abi": 1, "schema": 6, "catalog_models": len(records), "advertises_oauth": capabilities["auth_provider"], "credential_shapes": list(credential_shapes), "selected_key_differs_from_config": key != configured_key, "quota_buckets": len(buckets), "quota_credential_shapes": 3, "stream_chunks": stream_chunks, "host_calls": len(calls), "network_requests": 0, "listeners_started": 0, "result": "PASS"}))
+        print(json.dumps({"abi": 1, "schema": 6, "catalog_models": len(records), "advertises_oauth": capabilities["auth_provider"], "credential_shapes": list(credential_shapes), "selected_key_differs_from_config": key != configured_key, "quota_buckets": len(buckets), "quota_credential_shapes": 3, "v2_tasks_seen": len(v2_seen), "v2_opaque_rejected": True, "stream_chunks": stream_chunks, "host_calls": len(calls), "network_requests": 0, "listeners_started": 0, "result": "PASS"}))
     finally:
         plug.shutdown()
     assert not held, "host callback buffers leaked"
