@@ -1,241 +1,158 @@
-# OpenCode Go Omni CPA Plugin
+# OpenCode Go Omni
 
-This local fork derives from [massiveits/opencode-go-cliproxyapi](https://github.com/massiveits/opencode-go-cliproxyapi), revision `a4369b9b1cf18a4111a0167e3b50e5d69054fe45` (plugin 0.1.10). Its plugin identity is **`opencode-go-omni`**, version **`0.2.1-dev`**. The upstream MIT license and attribution are retained.
+[![Build](https://github.com/way326/opencode-go-omni/actions/workflows/build.yml/badge.svg)](https://github.com/way326/opencode-go-omni/actions/workflows/build.yml)
 
-Version 0.2.1-dev restores the requested public model ID in Chat, Messages, and Responses response metadata, including streaming lifecycle events. An exact match to the upstream target is required; other reported model IDs remain unchanged so clients can still detect a mismatch. Tool payloads, signatures, usage and native Gemini model-version fields are preserved.
+**OpenCode Go Omni** is a native [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) (CPA) v8 plugin that exposes OpenCode Go subscription models under the provider key **`opencode-go`**. One plugin, one credential pool, four upstream protocol routes:
 
-The fork adds Google Gemini GenerateContent as a fourth upstream route while retaining the existing Chat Completions, Messages, and Responses adapters. Models discovered from the configured Go subscription catalog share the existing **`opencode-go` provider and credential pool**. Gemini-family models use `/v1/models/{model}:generateContent` or `:streamGenerateContent?alt=sse`. Unknown model families stay visible in diagnostics until an explicit route override supplies their protocol.
+- OpenAI **Chat Completions**
+- Anthropic **Messages**
+- OpenAI **Responses**
+- Google **Gemini GenerateContent** (`/v1/models/{model}:generateContent`, `:streamGenerateContent?alt=sse`)
 
-All requests use CPA host HTTP callbacks. Inference propagates `host_callback_id` for request logging and cancellation. These native RPC callbacks in CPA v8.0.28 use the global CPA proxy setting, without per-credential or per-request proxy overrides. The plugin opens **no listening socket** and does not start a proxy process. Only the plugin shared library is built; the CPA executable is neither changed nor rebuilt. CPA's pinned SDK translators are compiled into this DLL for Gemini conversion; this reuses conversion code rather than invoking CPA's native Gemini Executor.
+Plugin version: **0.2.1-dev** (local revision). This project is a maintained fork of [massiveits/opencode-go-cliproxyapi](https://github.com/massiveits/opencode-go-cliproxyapi), revision `a4369b9b1cf18a4111a0167e3b50e5d69054fe45` (plugin 0.1.10); the upstream MIT license and attribution are retained (see [License & attribution](#license--attribution)).
 
-The original plugin and this fork must **not both be enabled**, because both claim the same provider. Install/enable and production acceptance are separate from building this deliverable. See [config.example.yaml](config.example.yaml) for a configuration fragment; it is not automatically applied.
+> The original upstream plugin and this fork must **not** be enabled at the same time - both claim the `opencode-go` provider.
 
-Authentication uses **OpenCode Go API keys**, configured under `plugins.configs.opencode-go-omni.api-keys`. The plugin does not implement browser OAuth. It no longer registers CPA's combined `AuthProvider` capability, which previously made CPA display an OAuth login card whose unsupported login handler returned HTTP 500. After installing this fix, refresh the management page; add or change subscription keys in the plugin configuration instead of using OAuth login.
+## What it is
 
-CPA's normal file credential loader continues to load plugin-generated files containing `"type": "opencode-go"`. The executor reads only the credential selected by CPA: historical `AuthAttributes.api_key`, then `AuthMetadata.api_key`, then the raw `StorageJSON` field. A present but invalid source is rejected, and the executor never substitutes the first configured key. Provider identity, four protocol routes, scheduling, and the quota page remain separate from OAuth login. The SDK's internal executor scope value `oauth` means credential-bound model registration here; it does not implement an OAuth exchange.
-
-If you manually imported a legacy file with only `"provider": "opencode-go"` and no `type`, back it up and migrate it to include `"type": "opencode-go"` before adopting this fix. Automatically generated files already include `type`. Verify account counts, disabled states, and model registration after replacement and after a later restart; the generic loader normally identifies accounts by filename. This source change and offline validation do not install or enable a new DLL in an existing CPA process.
-
-For isolated conversations, clients should send a stable unique `x-opencode-session` header on every turn. It takes precedence over CPA's canonical session metadata, then other recognized session headers, then the inherited first-user-turn content hash. The content-hash fallback cannot distinguish two independent conversations with the same opening message.
-
-Codex Multi-Agent V2 Responses input is normalized before upstream protocol routing: textual `agent_message` envelopes become ordinary user messages, retaining their ordered task content and attributed sender/recipient. Enable CPA's `client.codex.optimize-multi-agent-v2` and use fresh Codex sessions so the producer supplies plaintext task strings. A string stored under an agent part's `encrypted_content` field is copied under this plaintext contract; the plugin does not decrypt it. Recognized Fernet envelopes are rejected, but arbitrary ciphertext cannot be reliably distinguished without a trusted encoding marker. Other content types and unknown agent fields are rejected rather than silently dropped. Ordinary reasoning state, tool identities, session affinity and scheduling remain under the existing adapters and Codex runtime. Conversion support alone does not establish live V2 or Ultra proactive delegation support.
-
-Responses clients can return URL-backed images in `function_call_output` and `custom_tool_call_output` when using a Chat Completions upstream. The adapter retains a text tool receipt with the original call ID and supplies the full ordered result in an attributed user attachment, preserving image URLs (including base64 data URLs) and image detail. All results in a parallel tool batch must be paired before attachments are inserted. This bridge changes the image's carrier role; the selected upstream model must support image input, and live image recognition and the Codex `view_image` round trip require separate acceptance. File-ID-only images, file outputs, and image tool results on other cross-protocol routes are outside this fix.
-
-Native Gemini requests preserve opaque thought signatures and tool schemas; the plugin validates JSON and rewrites the model ID, then forwards the native fields without CPA's Gemini request normalizer. Upstream verifies the signatures. Native responses preserve `functionCall`, `functionResponse`, `thoughtSignature`, and other fields. Cross-format clients use CPA v8.0.28's translators and should retain signature/tool-call carrier fields on subsequent turns. Clients supply conversation history; the fork does not add server-side `previous_response_id` storage, explicit cache APIs, Interactions, or countTokens. Subscription-specific acceptance of native caching fields, tools, and multi-turn signature round trips still needs upstream acceptance testing.
-
-A native dynamic Go plugin for [CLIProxyAPI](https://help.router-for.me/plugin/development) that exposes OpenCode Go as a single provider (`opencode-go`).
-
-The plugin unifies model discovery, protocol translation, and execution across OpenCode Go's upstream endpoints while leveraging CLIProxyAPI's built-in authentication, scheduling, keys rotation, and cooldown management.
-
-## The Problem
-
-OpenCode Go exposes models across multiple API protocols (OpenAI Chat Completions `/v1/chat/completions`, Anthropic Messages `/v1/messages`, and OpenAI Responses `/v1/responses`).
-
-Without this plugin, using OpenCode Go in CLIProxyAPI requires configuring separate provider blocks for each protocol family. This leads to:
-- **Duplicated configuration & keys**: The same API keys must be configured across multiple provider blocks.
-- **Fragmented scheduling & rotation**: Keys rotation, rate limits, and cooldowns cannot be shared across protocols—exhausting quota on one protocol does not coordinate with another.
-- **Client protocol burden**: Clients must know beforehand which upstream protocol and endpoint each model requires.
-- **Fragmented catalog**: Models are split across disjoint provider namespaces instead of a unified model list.
-
-## The Solution
-
-This plugin exposes OpenCode Go as a single provider (`opencode-go`) backed by a shared keys pool:
-- **Unified auth pool**: Configure keys once; CLIProxyAPI schedules, rotates, and cools down keys across all protocols.
-- **Transparent protocol translation & routing**: Clients request models (e.g. `opencode-go/glm-5.2`, `opencode-go/gpt-5.6-luna`) without needing to know the upstream protocol format.
-- **Single model catalog**: All models are discovered and published under the `opencode-go` provider namespace in `/v1/models`.
+- **Plugin-only deliverable.** It builds to a single shared library (`-buildmode=c-shared`) that CPA loads from its plugin directory. It opens **no listening socket** and starts no proxy process; all host interaction goes through CPA host HTTP callbacks (`host_callback_id` is propagated for request logging and cancellation).
+- **A provider, not a core patch.** CPA keeps ownership of listeners, scheduling, the management UI and native quota surfaces; this repository never modifies or rebuilds the CPA executable.
+- **Catalog-driven.** Models discovered from the configured Go subscription catalog share the `opencode-go` provider and credential pool; unknown model families stay visible in diagnostics until an explicit route override supplies their protocol.
 
 ## Features
 
-- **Single Provider Namespace**: Exposes models under the `opencode-go` provider prefix (e.g. `opencode-go/glm-5.2`, `opencode-go/qwen3.7-max`, `opencode-go/gpt-5.6-luna`).
-- **Multi-Protocol Translation**: Translates requests and streaming responses between client formats and upstream endpoints:
-  - OpenAI Chat Completions (`/v1/chat/completions`)
-  - Anthropic Messages (`/v1/messages`)
-  - OpenAI Responses (`/v1/responses`)
-  - Google Gemini (`/v1/models/{model}:generateContent` / `:streamGenerateContent?alt=sse`)
-- **Thinking & Reasoning Support**: Maps reasoning effort across supported client and upstream formats.
-- **Dynamic Catalog Discovery**: Fetches remote model catalogs with an in-memory last-good snapshot and custom route overrides.
-- **Multi-Key Auth Scheduling**: Pools multiple API keys with CLIProxyAPI's native scheduler for rotation, retries, and error cooldowns across all protocols.
-- **Native Quota Integration**: Implements CPA's standard quota provider for `opencode-go` credentials, so Management Center can show the upstream rolling, weekly, and monthly windows in its native quota page. Queries use the credential selected by CPA and its host HTTP transport. No additional configuration, listener, or CPA core rebuild is required; rebuild the plugin DLL to use this capability.
-- **OpenCode Go Quota Page**: The separate `OpenCode Go Quota` page remains available. Page load lists configured credentials without contacting OpenCode; each card is refreshed manually and independently. Both quota interfaces share upstream response validation, and quota queries do not alter scheduling or reset upstream usage.
-
-### Quota behavior
-
-The standard quota capability uses `GET {base-url}/usage` with the selected
-credential's Bearer key. The host's plugin quota endpoint accepts an `auth_index`,
-not an upstream key supplied by the browser. The plugin converts the reported
-used percentage to CPA's `remainingFraction` and preserves upstream reset times.
-Quota queries share inference's key lookup order: attributes, metadata, then
-persisted JSON; a present but invalid key source is rejected without fallback.
-Decimal percentages are supported. Missing windows, missing percentages, and
-malformed data return an error rather than a full-quota result. Upstream error
-bodies and credentials are not included in quota errors.
-
-These are the windows reported by the upstream usage endpoint; the plugin does
-not infer separate limits for every model, a subscription tier, a dollar balance,
-or a remaining request count. Quota reset is unsupported. The native UI uses
-CPA's management authentication; only the standalone plugin page needs its
-existing remembered-management-password mechanism.
-
-## Stream completion and interrupted reasoning
-
-On the Chat Completions upstream route, synthesized Responses and Messages
-streams complete once a valid finish reason and its usage trailer have arrived;
-they do not wait for a redundant `[DONE]` after emitting their client terminal.
-A valid finish followed by EOF still flushes the terminal, while an incomplete
-trailing JSON/SSE line or EOF without a finish reason fails conversion rather
-than being reported as a successful synthesized reply. Native Chat passthrough
-keeps its existing clean-EOF policy and does not rewrite valid payload bytes.
-
-The opening request and the streaming pump each use `request-timeout` as a
-fixed time budget, not an idle timeout. Active output does not reset the pump
-budget. Stream cleanup has one outcome and one upstream close, including the
-watchdog; downstream completion is notified before upstream reclamation. Debug
-stream records include both stream IDs and the final reason.
-
-For recognized Codex HTTP Responses clients on the Chat Completions upstream
-route, a successful `response.completed` is held until converter finalization
-passes. One lifecycle owner then emits it as the final data-only SSE chunk,
-without an event line or trailing delimiter, immediately followed by normal
-downstream EOF. CPA v8.0.31 flushes this terminal in its EOF completion branch,
-avoiding the usage-accounting race when Codex closes after receiving it. Text,
-reasoning and tool deltas remain streamed; account selection and usage fields
-are preserved. Mid-stream cancellation, errors and timeouts remain failures.
-Length-limited replies retain their original `incomplete` terminal and framing.
-This compatibility behavior depends on CPA v8.0.31's Responses framer and must
-be retested after core upgrades. Unknown clients and other protocol routes
-retain their existing framing; WebSocket is outside this fix. Building a
-candidate does not install it or establish compatibility with every installed
-stream interceptor. No core or client configuration change is required.
-The first release recognizes the observed `Codex Desktop` headers and
-`codex_cli_rs` User-Agent; other identities retain legacy framing until tested.
-
-For DeepSeek Responses history, interrupted reasoning-only assistant turns use
-an explicit empty `content` string and retain their original `reasoning_content`.
-Tool-call turns keep their existing nullable content, and reasoning is never
-moved across user or tool-result boundaries. This is a request-structure fix;
-acceptance by the live upstream still requires a separately authorized test.
+- **Four upstream protocols unified** - Chat Completions, Anthropic Messages, OpenAI Responses and Gemini GenerateContent across one provider and one key pool.
+- **Reasoning & payload fidelity** - reasoning effort is mapped across client/upstream formats; interrupted reasoning-only assistant turns keep an explicit empty `content` and their original `reasoning_content`; tool-result images are bridged into legal upstream shapes; native Gemini model-version fields are preserved.
+- **Native quota integration** - implements CPA's standard quota provider so the Management Center quota page shows upstream rolling / weekly / monthly windows; a standalone quota page is also available.
+- **Multi-key scheduling** - pools API keys with CPA's native scheduler (rotation, retries, cooldowns) across all routes.
+- **Session isolation** - a stable `x-opencode-session` header per conversation.
+- **Codex Multi-Agent V2 normalization** - textual agent envelopes are normalized before upstream routing under a plaintext contract (see below).
+- **Streaming lifecycle guarantees** - single-owner terminal emission, a fixed time budget per phase, and explicit failure on truncated or finish-less streams.
 
 ## Requirements
 
-- **CLIProxyAPI**: `v8.0.28` (the SDK version pinned by this fork)
-- **Go Toolchain**: Go 1.26.7+ (with CGO enabled for C-shared build mode)
+- **CPA v8** with native plugin support.
+- **Go 1.26+** and a CGO-capable C compiler *to build* (LLVM-MinGW on Windows). The compiled plugin needs nothing extra at runtime.
+- OpenCode Go subscription API keys. **No OAuth** is implemented.
 
-## Build
+## Install
 
-Build the dynamic shared library for your platform:
+1. Build the shared library or download a release artifact (see [Build from source](#build-from-source)).
+2. Place it in CPA's plugin directory, e.g. `plugins/windows/amd64/opencode-go-omni.dll`.
+3. Merge the configuration block below into CPA's `config.yaml` under `plugins.configs.opencode-go-omni`, then refresh the Management Center page.
 
-### Windows (AMD64)
-```powershell
-go build -buildmode=c-shared -o plugins/windows/amd64/opencode-go-omni.dll .
-```
-
-### Linux (AMD64)
-```bash
-go build -buildmode=c-shared -o plugins/linux/amd64/opencode-go-omni.so .
-```
-
-### macOS (ARM64)
-```bash
-go build -buildmode=c-shared -o plugins/darwin/arm64/opencode-go-omni.dylib .
-```
-
-Place the compiled binary into your CLIProxyAPI plugin directory (e.g. `<cliproxyapi_root>/plugins/<os>/<arch>/`).
+> Building this repository does **not** install or enable the plugin in a running CPA. Installation, DLL replacement and live acceptance are separate, explicitly authorized steps.
 
 ## Configuration
 
-Configure the plugin in your CLIProxyAPI `config.yaml` under `plugins.configs.opencode-go-omni`:
+The values below mirror `config.example.yaml`, which is an annotated fragment to merge - it is not applied automatically:
 
 ```yaml
 plugins:
+  enabled: true
   configs:
+    opencode-go-cliproxyapi:    # original upstream plugin - keep disabled
+      enabled: false
     opencode-go-omni:
-      # Upstream base URL (default: "https://opencode.ai/inference/go/v1")
+      enabled: true
       base-url: "https://opencode.ai/inference/go/v1"
-
-      # Optional catalog endpoint override (default: "{base-url}/models")
-      # catalog-url: "https://opencode.ai/inference/go/v1/models"
-
-      # Client-facing model ID prefix configuration
-      model-prefix:
-        enabled: true           # true -> "opencode-go/<model>", false -> bare "<model>" (default: true)
-        value: "opencode-go"    # prefix name (default: "opencode-go")
-
-      # OpenCode Go API keys (at least one required). Supports ${ENV_VAR} expansion.
       api-keys:
-        - value: "sk-opencode-key-1"
-        - value: "sk-opencode-key-2"
         - value: "${OPENCODE_GO_API_KEY}"
-
-      # Catalog discovery settings
-      catalog:
-        refresh-interval: "15m"          # discovery refresh cadence, min "1m" (default: "15m")
-        stale-while-unavailable: true    # retain last good catalog snapshot on refresh failure (default: true)
-
-      # Protocol enable/disable switches (all default to true)
+      model-prefix:
+        enabled: true
+        value: "opencode-go"
       protocols:
-        chat-completions: true   # enables models routed to /v1/chat/completions
-        messages: true           # enables models routed to /v1/messages
-        responses: true          # enables models routed to /v1/responses
-        gemini: true             # enables models routed to Gemini GenerateContent
-
-      # Explicit route overrides per model (takes priority over built-in prefix routing)
-      route-overrides:
-        "custom-model":
-          protocol: "messages"           # "chat-completions" | "messages" | "responses"
-          endpoint: "/v1/messages"       # must start with /
-
-      # Execution settings
-      request-timeout: "5m"              # upstream request timeout (default: "5m")
-      max-response-bytes: 67108864       # max non-streaming response body size in bytes (default: 64 MiB)
-      allow-http: false                  # allow http:// scheme for local mock/testing (default: false)
+        chat-completions: true
+        messages: true
+        responses: true
+        gemini: true
+      catalog:
+        refresh-interval: "15m"
+        stale-while-unavailable: true
+      request-timeout: "5m"
+      max-response-bytes: 67108864
+      allow-http: false
 ```
 
-### Configuration Options
+| Key | Notes |
+| --- | --- |
+| `base-url` | Upstream OpenCode Go API base. |
+| `api-keys` | One or more subscription keys; pooled by CPA's scheduler. |
+| `model-prefix` | Public model IDs are prefixed so clients see `opencode-go/...`. |
+| `protocols.*` | Enable or disable individual upstream routes. |
+| `catalog.refresh-interval` / `catalog.stale-while-unavailable` | Catalog refresh period; keep the last-good catalog while upstream is unavailable. |
+| `request-timeout` | Fixed time budget for the opening request and for the streaming pump - not an idle timeout. Active output does not reset the pump budget. |
+| `max-response-bytes` | Response size bound. |
+| `allow-http` | Keep `false` unless TLS is terminated elsewhere. |
 
-| Option | Type | Default | Description |
-|---|---|---|---|
-| `api-keys` | `[]object` | *(Required)* | List of API keys (`- value: "..."`). Supports `${ENV_VAR}` expansion. Duplicates and empty values are rejected. |
-| `base-url` | `string` | `https://opencode.ai/inference/go/v1` | Upstream base URL. Must be valid HTTPS (or HTTP if `allow-http: true`) without query parameters, fragments, or userinfo. |
-| `catalog-url` | `string` | `{base-url}/models` | Full URL for catalog discovery. Defaults to `{base-url}/models`. |
-| `model-prefix.enabled` | `bool` | `true` | When `true`, client-facing model names use `<prefix>/<model>`. When `false`, uses bare model IDs. |
-| `model-prefix.value` | `string` | `opencode-go` | Provider prefix string when prefixing is enabled. |
-| `catalog.refresh-interval` | `duration` | `15m` | Interval between catalog polling refreshes (e.g. `15m`, `1h`). Minimum is `1m`. |
-| `catalog.stale-while-unavailable` | `bool` | `true` | When `true`, serves the last valid catalog snapshot if an update fails. |
-| `protocols.chat-completions` | `bool` | `true` | Protocol switch for Chat Completions endpoints. |
-| `protocols.messages` | `bool` | `true` | Protocol switch for Messages endpoints. |
-| `protocols.responses` | `bool` | `true` | Protocol switch for Responses endpoints. |
-| `protocols.gemini` | `bool` | `true` | Protocol switch for native Gemini GenerateContent endpoints. |
-| `route-overrides` | `map` | `{}` | Map of model ID to `{ protocol: "...", endpoint: "..." }` overriding built-in family routing. Valid protocols: `chat-completions`, `messages`, `responses`, `gemini`. |
-| `request-timeout` | `duration` | `5m` | Fixed timeout for opening an upstream request and, separately, the streaming pump; not reset by activity. Must be positive. |
-| `max-response-bytes` | `int64` | `67108864` (64 MiB) | Maximum non-streaming response body size in bytes. |
-| `allow-http` | `bool` | `false` | When `true`, permits `http://` scheme in `base-url` / `catalog-url` for local testing. |
+## Authentication & credentials
 
-## Testing
+- API keys are configured under `plugins.configs.opencode-go-omni.api-keys`. The plugin intentionally does **not** register a browser OAuth login (no combined `AuthProvider` capability and no login card).
+- CPA's file credential loader continues to load plugin-generated files containing `"type": "opencode-go"`. The executor reads only the credential selected by CPA, in order: historical `AuthAttributes.api_key`, then `AuthMetadata.api_key`, then the raw `StorageJSON` field. A present-but-invalid source is rejected - the executor never silently substitutes the first configured key.
+- Legacy files imported with only `"provider": "opencode-go"` and no `"type"` should be backed up and given `"type": "opencode-go"` before adoption.
+
+## Behavior notes
+
+### Quota
+
+- The standard quota capability queries `GET {base-url}/usage` with the selected credential's Bearer key. The host quota endpoint accepts an `auth_index` - never a browser-supplied key. Reported used percentages are converted to CPA's `remainingFraction` with upstream reset times preserved.
+- Missing windows, missing percentages or malformed data return an error rather than a full-quota result; upstream error bodies and credentials are never included in quota errors. Quota reset is unsupported.
+- The standalone **OpenCode Go Quota** page shares the same response validation. Page load lists configured credentials without contacting OpenCode; each card refreshes manually and independently.
+
+### Sessions and streaming
+
+- Clients should send a stable unique `x-opencode-session` header on every turn. It takes precedence over CPA's canonical session metadata, other recognized session headers, and the inherited first-user-turn content-hash fallback (which cannot distinguish two conversations with the same opening message).
+- On the Chat Completions upstream route, synthesized Responses and Messages streams complete when a valid finish reason and its usage trailer arrive - a redundant `[DONE]` is not required. A valid finish followed by EOF still flushes the terminal; an incomplete trailing line or EOF without a finish reason fails conversion instead of being reported as success.
+- For recognized Codex clients (observed `Codex Desktop` headers and the `codex_cli_rs` user agent), a successful `response.completed` is held until converter finalization passes, then emitted as the final data-only SSE chunk immediately before downstream EOF. This compatibility behavior depends on the CPA core's Responses framer - **retest after core upgrades**. WebSocket is outside this fix.
+
+### Codex Multi-Agent V2
+
+- Enable CPA's `client.codex.optimize-multi-agent-v2` and use fresh Codex sessions so the producer supplies plaintext task strings. Textual `agent_message` envelopes become ordinary user messages, preserving ordered task content and sender/recipient attribution.
+- Recognized Fernet envelopes are rejected, and other content types or unknown agent fields are rejected rather than silently dropped. The plugin does not decrypt anything.
+
+### Model IDs
+
+- Chat, Messages and Responses responses restore the requested public model ID in response metadata, including streaming lifecycle events. An exact match to the upstream target is required; other reported model IDs remain unchanged so clients can still detect mismatches.
+
+## Build from source
 
 ```powershell
-# Run all tests
-go test ./...
+# Windows (AMD64), local development (debug tag, per CONTRIBUTING.md)
+go build -tags debug -buildmode=c-shared -o plugins/windows/amd64/opencode-go-omni.dll .
 
-# Run tests with coverage
-go test ./... -cover
-
-# Run linter / vetting
-go vet ./...
+# Windows packaging (release DLL + zip + sha256 under dist/)
+.\build.ps1 -GoExe <path-to-go> -CCompiler <path-to-gcc>
 ```
 
-## Current model coverage and client usage
+```bash
+# Linux (AMD64)
+go build -buildmode=c-shared -o plugins/linux/amd64/opencode-go-omni.so .
 
-The live Go catalog read on 2026-10-14 returned 40 IDs. The offline catalog fixture covers all 40: 26 Chat Completions, 7 Messages, 6 Responses, and 1 Gemini route. Model presence and protocol routing are distinct from successful inference or a particular key's subscription permissions.
+# macOS (ARM64)
+go build -buildmode=c-shared -o plugins/darwin/arm64/opencode-go-omni.dylib .
+```
 
-Official Go documentation and models.dev supply protocol metadata for 36 of these IDs. The existing family routes cover `deepseek-flash`, `glm-5.1`, and `minimax-m2.5`. `omen-alpha` has an explicit Chat compatibility route with a diagnostic: its minimal upstream probe returned HTTP 200 but no SSE event before the 25-second timeout. Its full streaming acceptance is pending.
+Offline verification:
 
-Two Qwen IDs are exact exceptions to the inherited family table: `qwen3.6-plus` and `qwen3.7-max` use Chat Completions. `qwen3.7-plus`, `qwen3.8-max`, and `qwen3.8-flash` use Messages. Claude, Space Bunny, Step, and Cat Jam routes are also represented.
+```powershell
+go test -tags debug ./...
+go vet ./...
+python tools/abi_smoke.py <path-to-built-dll>    # offline C ABI smoke: zero network, zero listeners
+```
 
-After an authorized installation, an OpenAI-compatible client uses the existing CPA base `http://127.0.0.1:8317/v1` and model `opencode-go/gemini-4-argon-contributor`. A native Gemini client uses CPA's frontend action at `/v1beta/models/opencode-go/gemini-4-argon-contributor:streamGenerateContent?alt=sse`; the plugin requests the upstream `/inference/go/v1` action. The client authenticates with its **CPA access key**; the OpenCode Go subscription key belongs in the plugin configuration. Set a stable, unique `x-opencode-session` on every turn.
+Tests under `tests/` carry the `live` build tag and are opt-in against a running CPA.
 
-The example environment key must be available to the CPA process, because expansion happens inside the loaded plugin. Never overwrite the whole existing CPA configuration with the example fragment. Keep the old OpenCode plugin disabled and use the prefixed model IDs to avoid native-provider model collisions.
+## Development
 
-Rebuild this plugin only on Windows with `./build.ps1 -GoExe <go.exe> -CCompiler <gcc.exe>`. Offline DLL verification is `python tools/abi_smoke.py <absolute DLL path>`. Neither command installs or enables the plugin.
+See [CONTRIBUTING.md](CONTRIBUTING.md): focused PRs against `main`, local builds and tests with `-tags debug`, offline unit tests only, and release-note updates for user-facing changes.
 
-Sources: [official Go documentation](https://dev.opencode.ai/v2/docs/console/go/), [documentation source](https://github.com/anomalyco/opencode/blob/dev/services/www/src/docs/content/console/go.mdx), [models.dev data](https://models.dev/api.json), and [CPA v8.0.28](https://github.com/router-for-me/CLIProxyAPI/tree/v8.0.28).
+Working documents from before the rename to `opencode-go-omni` (validation records and fix plans) are preserved verbatim under [docs/](docs/) with a short index. Version history is kept in [RELEASE_NOTES.md](RELEASE_NOTES.md).
+
+## Compatibility & status
+
+- Plugin ABI 1 / RPC schema 6; compiled against the CPA v8 plugin SDK pinned in `go.mod`. Development validation ran against CPA core v8.0.30-v8.0.31; re-verify the Codex Responses terminal behavior after CPA core upgrades.
+- Known local revision: `0.2.1-dev`. Release packaging (`build.ps1`, CI workflow) and installation are separate steps.
+
+## License & attribution
+
+MIT - see [LICENSE](LICENSE). Forked from [massiveits/opencode-go-cliproxyapi](https://github.com/massiveits/opencode-go-cliproxyapi) at revision `a4369b9b1cf18a4111a0167e3b50e5d69054fe45` (plugin 0.1.10); the upstream copyright notice and license are retained. Maintained at [way326/opencode-go-omni](https://github.com/way326/opencode-go-omni).
