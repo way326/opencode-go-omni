@@ -15,9 +15,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"sync"
-	"sync/atomic"
-	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
@@ -462,10 +459,12 @@ type streamConverter interface {
 	Feed(chunk []byte) (events [][]byte, done bool, eErr *errclass.Error)
 }
 
-// Compile-time proof the close-without-terminal Flush seam (F5) picks up
-// both converters that can hold a deferred terminal.
+// Keep Chat EOF validation wired into the pump; Messages retains its
+// existing deferred-terminal Flush seam.
 var (
-	_ interface{ Flush() [][]byte } = (*chatcompletions.StreamConverter)(nil)
+	_ interface {
+		Finish() ([][]byte, *errclass.Error)
+	} = (*chatcompletions.StreamConverter)(nil)
 	_ interface{ Flush() [][]byte } = (*messages.StreamConverter)(nil)
 )
 
@@ -532,9 +531,7 @@ func (m *Manager) executeStream(req executorRequest) ([]byte, error) {
 	if st >= 400 {
 		var body []byte
 		if id != "" {
-			watchdog := time.AfterFunc(res.cfg.RequestTimeout, func() {
-				_ = m.bridge.StreamClose(id)
-			})
+			lifecycle := newStreamLifecycle(m.bridge, "", id, res.cfg.RequestTimeout)
 			for int64(len(body)) < res.cfg.MaxResponseBytes {
 				chunk, readError, closed, readErr := m.bridge.StreamRead(id)
 				remaining := res.cfg.MaxResponseBytes - int64(len(body))
@@ -546,8 +543,7 @@ func (m *Manager) executeStream(req executorRequest) ([]byte, error) {
 					break
 				}
 			}
-			watchdog.Stop()
-			_ = m.bridge.StreamClose(id)
+			lifecycle.finish("", "http_error_body")
 		}
 		return classEnvelope(shared.UpstreamStatusError(st, body)), nil
 	}
@@ -560,39 +556,42 @@ func (m *Manager) executeStream(req executorRequest) ([]byte, error) {
 		if m.bridge != nil {
 			defer m.bridge.inFlight.Done()
 		}
-		m.pumpStream(downID, id, res, executorResponseFormat(req))
+		m.pumpStream(downID, id, res, executorResponseFormat(req), shouldDeferResponsesTerminal(req, res.rec.Protocol))
 	}()
 	return okEnvelope(struct{}{}), nil
 }
 
-func (m *Manager) pumpStream(downID, upstreamID string, res *resolvedExecution, sourceFormat string) {
-	var closeOnce sync.Once
-	closeStreams := func(downErrMsg string) {
-		closeOnce.Do(func() {
-			_ = m.bridge.StreamClose(upstreamID)
-			_ = m.bridge.StreamCloseDownstream(downID, downErrMsg)
-		})
-	}
-	defer closeStreams("")
+func (m *Manager) pumpStream(downID, upstreamID string, res *resolvedExecution, sourceFormat string, deferTerminal bool) {
+	m.pumpStreamWithConverter(downID, upstreamID, res, sourceFormat, deferTerminal, executionStreamConverter(res, sourceFormat))
+}
 
-	var aborted atomic.Bool
-	watchdog := time.AfterFunc(res.cfg.RequestTimeout, func() {
-		defer func() {
-			if r := recover(); r != nil && m.bridge != nil {
-				_ = m.bridge.Log("error", "stream watchdog panicked", nil)
-			}
-		}()
-		aborted.Store(true)
-		_ = m.bridge.StreamClose(upstreamID)
-	})
-	defer watchdog.Stop()
+func (m *Manager) pumpStreamWithConverter(downID, upstreamID string, res *resolvedExecution, sourceFormat string, deferTerminal bool, conv streamConverter) {
+	lifecycle := newStreamLifecycle(m.bridge, downID, upstreamID, res.cfg.RequestTimeout)
+	defer lifecycle.finish("", "cleanup")
+	debugTrace("executor stream pump start down_id=%q upstream_id=%q timeout_ms=%d", downID, upstreamID, res.cfg.RequestTimeout.Milliseconds())
 
-	conv := executionStreamConverter(res, sourceFormat)
+	var terminal responsesTerminalBuffer
 	emit := func(events [][]byte) error {
-		for i, event := range events {
-			events[i] = clientResponseModel(res, sourceFormat, event)
+		for _, event := range events {
+			if lifecycle.ended() {
+				return errors.New("stream already ended")
+			}
+			event = clientResponseModel(res, sourceFormat, event)
+			if deferTerminal {
+				var err error
+				event, err = terminal.accept(event)
+				if err != nil {
+					return err
+				}
+				if event == nil {
+					continue
+				}
+			}
+			if err := m.bridge.StreamEmit(downID, event); err != nil {
+				return err
+			}
 		}
-		return m.emitAll(downID, events)
+		return nil
 	}
 	var (
 		total          int64
@@ -601,32 +600,31 @@ func (m *Manager) pumpStream(downID, upstreamID string, res *resolvedExecution, 
 	)
 	for {
 		payload, readErrMsg, closed, err := m.bridge.StreamRead(upstreamID)
-		debugTrace("executor stream read chunk_len=%d closed=%t readErrMsg=%q err=%v", len(payload), closed, readErrMsg, err)
+		debugTrace("executor stream read down_id=%q upstream_id=%q chunk_len=%d closed=%t readErrMsg=%q err=%v", downID, upstreamID, len(payload), closed, readErrMsg, err)
 		upstreamClosed = closed
-		if aborted.Load() {
-			closeStreams(errclass.Redact("stream exceeded request-timeout"))
+		if lifecycle.ended() {
 			return
 		}
 		if err != nil {
-			closeStreams(errclass.Redact(err.Error()))
+			lifecycle.finish(errclass.Redact(err.Error()), "read_error")
 			return
 		}
 		if readErrMsg != "" {
-			closeStreams(errclass.Redact(readErrMsg))
+			lifecycle.finish(errclass.Redact(readErrMsg), "upstream_error")
 			return
 		}
 		total += int64(len(payload))
 		if total > res.cfg.MaxResponseBytes {
-			closeStreams(errclass.Redact("stream exceeded max-response-bytes"))
+			lifecycle.finish("stream exceeded max-response-bytes", "size_limit")
 			return
 		}
 		events, done, convErr := conv.Feed(payload)
 		if convErr != nil {
-			closeStreams(errclass.Redact(convErr.Message))
+			lifecycle.finish(errclass.Redact(convErr.Message), "conversion_error")
 			return
 		}
 		if emitErr := emit(events); emitErr != nil {
-			closeStreams(errclass.Redact(emitErr.Error()))
+			lifecycle.finish(errclass.Redact(emitErr.Error()), "emit_error")
 			return
 		}
 		convDone = done
@@ -634,42 +632,57 @@ func (m *Manager) pumpStream(downID, upstreamID string, res *resolvedExecution, 
 			break
 		}
 	}
-	debugTrace("executor stream loop end convDone=%t upstreamClosed=%t", convDone, upstreamClosed)
-	// Finalize even when Feed saw a sentinel: Gemini's finisher validates
-	// completion and guards duplicate terminal events itself.
+	debugTrace("executor stream loop end down_id=%q upstream_id=%q convDone=%t upstreamClosed=%t", downID, upstreamID, convDone, upstreamClosed)
+	// Feed stops at a complete client terminal. Reject any invalid suffix
+	// already received in that same upstream payload before exposing success.
+	// Do not read again: a legal finish+usage may leave upstream open forever.
+	if deferTerminal {
+		if validator, ok := conv.(interface{ ValidateTerminalTail() *errclass.Error }); ok {
+			if tailErr := validator.ValidateTerminalTail(); tailErr != nil {
+				lifecycle.finish(errclass.Redact(tailErr.Message), "terminal_tail_error")
+				return
+			}
+		}
+	}
+	// Finalize even when Feed saw a terminal: finishers validate completion
+	// and guard duplicate terminal events themselves.
 	if finisher, ok := conv.(interface {
 		Finish() ([][]byte, *errclass.Error)
 	}); ok {
 		flushed, finishErr := finisher.Finish()
 		if finishErr != nil {
-			closeStreams(errclass.Redact(finishErr.Message))
+			lifecycle.finish(errclass.Redact(finishErr.Message), "finish_error")
 			return
 		}
 		if emitErr := emit(flushed); emitErr != nil {
-			closeStreams(errclass.Redact(emitErr.Error()))
+			lifecycle.finish(errclass.Redact(emitErr.Error()), "emit_error")
 			return
 		}
 	} else if !convDone && upstreamClosed {
 		if flusher, ok := conv.(interface{ Flush() [][]byte }); ok {
 			flushed := flusher.Flush()
 			if emitErr := emit(flushed); emitErr != nil {
-				closeStreams(errclass.Redact(emitErr.Error()))
+				lifecycle.finish(errclass.Redact(emitErr.Error()), "emit_error")
 				return
 			}
 		}
 	}
-}
-
-// emitAll feeds converted events downstream in order. StreamEmit is
-// deadline-bounded (emitTimeout), so a host that stops draining the
-// downstream stream surfaces here as an error; the pump loop treats that
-// as a post-first-byte stream-fatal failure and runs fail(), whose
-// Once-closer releases both streams.
-func (m *Manager) emitAll(downStreamID string, events [][]byte) error {
-	for _, evt := range events {
-		if err := m.bridge.StreamEmit(downStreamID, evt); err != nil {
-			return err
+	if deferTerminal {
+		payload, err := terminal.terminal()
+		if err != nil {
+			lifecycle.finish(errclass.Redact(err.Error()), "terminal_error")
+			return
 		}
+		if payload == nil {
+			// A genuine incomplete/failed terminal retains its original framing
+			// and outcome; only a clean success uses the deferred EOF commit.
+			lifecycle.finish("", "terminal")
+		} else {
+			lifecycle.commitTerminal(payload)
+		}
+	} else if convDone {
+		lifecycle.finish("", "terminal")
+	} else {
+		lifecycle.finish("", "eof")
 	}
-	return nil
 }

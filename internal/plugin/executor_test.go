@@ -755,9 +755,9 @@ func TestExecuteStreamHappyPathClaudeSource(t *testing.T) {
 	}
 }
 
-func TestExecuteStreamCleanCloseWithoutTerminalFrame(t *testing.T) {
-	// Upstream ends (bridge done) without sending [DONE]: the executor must
-	// flush the converter, close both streams cleanly, and report success.
+func TestExecuteStreamCloseWithoutTerminalFrameFails(t *testing.T) {
+	// EOF without a finish_reason or sentinel is a truncated response, even
+	// when the transport itself closed without an error.
 	m, f := newStreamManager(t, streamScript{
 		upstreamID: "up-5",
 		frames: []string{
@@ -778,7 +778,7 @@ func TestExecuteStreamCleanCloseWithoutTerminalFrame(t *testing.T) {
 		t.Fatalf("upstream closes = %d", got)
 	}
 	downCloses := f.callsOf(pluginabi.MethodHostStreamClose)
-	if len(downCloses) != 1 || strings.Contains(string(downCloses[0].payload), `"error"`) {
+	if len(downCloses) != 1 || !strings.Contains(string(downCloses[0].payload), `"error"`) {
 		t.Fatalf("downstream closes = %v", downCloses)
 	}
 }
@@ -965,6 +965,15 @@ func TestExecuteStream4xxWatchdogUnblocksStalledRead(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Fatalf("stalled read took too long to unblock: %v", elapsed)
 	}
+	if !m.bridge.WaitForInFlight(2 * time.Second) {
+		t.Fatal("4xx watchdog cleanup was not drained")
+	}
+	if got := len(f.callsOf(pluginabi.MethodHostHTTPStreamClose)); got != 1 {
+		t.Fatalf("upstream closes = %d, want one shared watchdog/reader close", got)
+	}
+	if got := len(f.callsOf(pluginabi.MethodHostStreamClose)); got != 0 {
+		t.Fatalf("bootstrap error must not close a downstream stream, got %d", got)
+	}
 }
 
 func TestExecuteStreamOpenTransportError(t *testing.T) {
@@ -1083,9 +1092,9 @@ func TestExecuteStreamEmitFailsMidstream(t *testing.T) {
 	}
 }
 
-func TestExecuteStreamPartialLineDroppedOnCleanClose(t *testing.T) {
-	// No trailing newline and no [DONE]: the buffered partial line never
-	// formed an SSE event, so the stream still ends cleanly.
+func TestExecuteStreamPartialLineFailsOnClose(t *testing.T) {
+	// A partial JSON/SSE line at EOF must be reported as truncation rather
+	// than silently dropped and counted as a successful response.
 	m, f := newStreamManager(t, streamScript{
 		upstreamID: "up-9",
 		frames:     []string{"data: {truncated"},
@@ -1101,8 +1110,8 @@ func TestExecuteStreamPartialLineDroppedOnCleanClose(t *testing.T) {
 	}
 	m.bridge.WaitForInFlight(5 * time.Second)
 	downCloses := f.callsOf(pluginabi.MethodHostStreamClose)
-	if len(downCloses) != 1 || strings.Contains(string(downCloses[0].payload), `"error"`) {
-		t.Fatalf("downstream must close cleanly: %v", downCloses)
+	if len(downCloses) != 1 || !strings.Contains(string(downCloses[0].payload), `"error"`) {
+		t.Fatalf("truncated stream must close with error: %v", downCloses)
 	}
 	if got := len(f.callsOf(pluginabi.MethodHostHTTPStreamClose)); got != 1 {
 		t.Fatalf("upstream closes = %d", got)
