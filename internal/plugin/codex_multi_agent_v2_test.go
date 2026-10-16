@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"opencode-go-cliproxyapi/internal/errclass"
+	"github.com/way326/opencode-go-omni/internal/errclass"
 )
 
 // normalizeV2OK runs the helper and fails the test when it returns an error.

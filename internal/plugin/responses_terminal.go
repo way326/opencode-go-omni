@@ -15,7 +15,7 @@ import (
 	"net/http"
 	"strings"
 
-	"opencode-go-cliproxyapi/internal/catalog"
+	"github.com/way326/opencode-go-omni/internal/catalog"
 )
 
 // responsesChatSourceFormat is the downstream format of a Codex Responses

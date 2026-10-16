@@ -15,7 +15,7 @@ func TestQuotaV8IdentityAndEndpoint(t *testing.T) {
 	if err != nil || resp.StatusCode >= 400 {
 		t.Fatalf("resource error: %v, status %d", err, resp.StatusCode)
 	}
-	if !bytes.Contains(resp.Body, []byte("/v8/management/plugins/opencode-go-unified/quota-usage")) || bytes.Contains(resp.Body, []byte("__QUOTA_ENDPOINT__")) {
+	if !bytes.Contains(resp.Body, []byte("/v8/management/plugins/opencode-go-omni/quota-usage")) || bytes.Contains(resp.Body, []byte("__QUOTA_ENDPOINT__")) {
 		t.Fatal("new quota page endpoint was not materialized")
 	}
 	resp, err = m.HandleManagement(context.Background(), pluginapi.ManagementRequest{Method: http.MethodPost, Path: "/v8/management/plugins/" + pluginName + "/quota-usage", Body: []byte(`{}`)})

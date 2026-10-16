@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"opencode-go-cliproxyapi/internal/errclass"
+	"github.com/way326/opencode-go-omni/internal/errclass"
 )
 
 func TestRewriteModelID(t *testing.T) {

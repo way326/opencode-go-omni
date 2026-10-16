@@ -8,7 +8,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 
-	"opencode-go-cliproxyapi/internal/config"
+	"github.com/way326/opencode-go-omni/internal/config"
 )
 
 // geminiBaseURL is the unified upstream base URL every gemini URL assertion

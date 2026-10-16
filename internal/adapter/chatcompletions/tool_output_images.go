@@ -9,8 +9,8 @@ import (
 	"net/url"
 	"strings"
 
-	"opencode-go-cliproxyapi/internal/adapter/shared"
-	"opencode-go-cliproxyapi/internal/errclass"
+	"github.com/way326/opencode-go-omni/internal/adapter/shared"
+	"github.com/way326/opencode-go-omni/internal/errclass"
 )
 
 // toolImageBridge keeps Chat tool messages textual and attaches multimodal

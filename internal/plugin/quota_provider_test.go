@@ -13,7 +13,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 
-	"opencode-go-cliproxyapi/internal/config"
+	"github.com/way326/opencode-go-omni/internal/config"
 )
 
 const quotaFixture = `{"usage":{"rolling":{"status":"ok","percent":4.5,"resetsAt":"2026-10-15T06:58:30.000Z"},"weekly":{"status":"ok","percent":7,"resetsAt":"2026-10-19T00:00:00.000Z"},"monthly":{"status":"ok","percent":41,"resetsAt":"2026-10-27T03:46:17.000Z"}}}`

@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"opencode-go-cliproxyapi/internal/adapter/shared"
-	"opencode-go-cliproxyapi/internal/errclass"
+	"github.com/way326/opencode-go-omni/internal/adapter/shared"
+	"github.com/way326/opencode-go-omni/internal/errclass"
 )
 
 // StreamConverter converts an upstream /v1/responses SSE stream into the

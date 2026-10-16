@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
-	"opencode-go-cliproxyapi/internal/config"
-	"opencode-go-cliproxyapi/internal/errclass"
+	"github.com/way326/opencode-go-omni/internal/config"
+	"github.com/way326/opencode-go-omni/internal/errclass"
 )
 
 func TestExecutorEOFDeferredTerminal(t *testing.T) {

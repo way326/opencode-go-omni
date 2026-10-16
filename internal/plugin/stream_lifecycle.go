@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	"opencode-go-cliproxyapi/internal/errclass"
+	"github.com/way326/opencode-go-omni/internal/errclass"
 )
 
 // streamLifecycle gives normal completion, pump failures, and the watchdog one

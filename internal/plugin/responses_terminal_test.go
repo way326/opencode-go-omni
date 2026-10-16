@@ -9,7 +9,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 
-	"opencode-go-cliproxyapi/internal/catalog"
+	"github.com/way326/opencode-go-omni/internal/catalog"
 )
 
 // WP-1 pins for the gate and terminal buffer: only recognized Codex HTTP

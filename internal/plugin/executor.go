@@ -19,14 +19,14 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 
-	"opencode-go-cliproxyapi/internal/adapter/chatcompletions"
-	"opencode-go-cliproxyapi/internal/adapter/gemini"
-	"opencode-go-cliproxyapi/internal/adapter/messages"
-	"opencode-go-cliproxyapi/internal/adapter/responses"
-	"opencode-go-cliproxyapi/internal/adapter/shared"
-	"opencode-go-cliproxyapi/internal/catalog"
-	"opencode-go-cliproxyapi/internal/config"
-	"opencode-go-cliproxyapi/internal/errclass"
+	"github.com/way326/opencode-go-omni/internal/adapter/chatcompletions"
+	"github.com/way326/opencode-go-omni/internal/adapter/gemini"
+	"github.com/way326/opencode-go-omni/internal/adapter/messages"
+	"github.com/way326/opencode-go-omni/internal/adapter/responses"
+	"github.com/way326/opencode-go-omni/internal/adapter/shared"
+	"github.com/way326/opencode-go-omni/internal/catalog"
+	"github.com/way326/opencode-go-omni/internal/config"
+	"github.com/way326/opencode-go-omni/internal/errclass"
 )
 
 // executorRequest mirrors rpcExecutorRequest: the SDK embeds

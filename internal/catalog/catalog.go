@@ -21,7 +21,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 
-	"opencode-go-cliproxyapi/internal/config"
+	"github.com/way326/opencode-go-omni/internal/config"
 )
 
 // catalogBudgetFloor keeps an undersized max-response-bytes knob from

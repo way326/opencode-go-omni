@@ -3,7 +3,7 @@ package chatcompletions
 import (
 	"testing"
 
-	"opencode-go-cliproxyapi/internal/errclass"
+	"github.com/way326/opencode-go-omni/internal/errclass"
 )
 
 // Post-terminal stream lifecycle pins (Chat Completions -> claude /

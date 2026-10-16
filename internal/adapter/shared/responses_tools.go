@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"strings"
 
-	"opencode-go-cliproxyapi/internal/errclass"
+	"github.com/way326/opencode-go-omni/internal/errclass"
 )
 
 // responseToolIdentity is the original (name, namespace) pair behind one

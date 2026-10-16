@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"opencode-go-cliproxyapi/internal/errclass"
+	"github.com/way326/opencode-go-omni/internal/errclass"
 )
 
 // finishOnlyFrame is one complete SSE frame with a terminal finishReason.

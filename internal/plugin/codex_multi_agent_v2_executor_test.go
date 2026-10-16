@@ -10,8 +10,8 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
-	"opencode-go-cliproxyapi/internal/adapter/chatcompletions"
-	"opencode-go-cliproxyapi/internal/catalog"
+	"github.com/way326/opencode-go-omni/internal/adapter/chatcompletions"
+	"github.com/way326/opencode-go-omni/internal/catalog"
 )
 
 func TestCodexV2OriginalAdapterReproducesFailure(t *testing.T) {

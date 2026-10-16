@@ -5,7 +5,7 @@ plugins:
   configs:
     opencode-go-cliproxyapi:
       enabled: false
-    opencode-go-unified:
+    opencode-go-omni:
       enabled: true
       base-url: "https://opencode.ai/inference/go/v1"
       api-keys:

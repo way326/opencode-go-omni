@@ -1,6 +1,6 @@
 """Offline Windows C ABI smoke test. No network, files of CPA, or listening ports.
 
-Usage: python tools/abi_smoke.py path/to/opencode-go-unified.dll
+Usage: python tools/abi_smoke.py path/to/opencode-go-omni.dll
 The fake host keeps auth records in memory, returns deterministic inference,
 and serves a deterministic OpenCode Go /usage fixture for the quota provider.
 """
@@ -145,7 +145,7 @@ def main(path):
     try:
         reg = invoke("plugin.register", {"schema_version": 6, "config_yaml": b64("api-keys:\n  - value: " + configured_key + "\n")})
         meta = reg["metadata"]
-        assert meta.get("Name", meta.get("name")) == "opencode-go-unified"
+        assert meta.get("Name", meta.get("name")) == "opencode-go-omni"
         assert reg["schema_version"] == 6
         capabilities = reg["capabilities"]
         assert capabilities["auth_provider"] is False, "plugin must not advertise OAuth login"

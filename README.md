@@ -1,6 +1,6 @@
-# OpenCode Go Unified CPA Plugin
+# OpenCode Go Omni CPA Plugin
 
-This local fork derives from [massiveits/opencode-go-cliproxyapi](https://github.com/massiveits/opencode-go-cliproxyapi), revision `a4369b9b1cf18a4111a0167e3b50e5d69054fe45` (plugin 0.1.10). Its plugin identity is **`opencode-go-unified`**, version **`0.2.1-dev`**. The upstream MIT license and attribution are retained.
+This local fork derives from [massiveits/opencode-go-cliproxyapi](https://github.com/massiveits/opencode-go-cliproxyapi), revision `a4369b9b1cf18a4111a0167e3b50e5d69054fe45` (plugin 0.1.10). Its plugin identity is **`opencode-go-omni`**, version **`0.2.1-dev`**. The upstream MIT license and attribution are retained.
 
 Version 0.2.1-dev restores the requested public model ID in Chat, Messages, and Responses response metadata, including streaming lifecycle events. An exact match to the upstream target is required; other reported model IDs remain unchanged so clients can still detect a mismatch. Tool payloads, signatures, usage and native Gemini model-version fields are preserved.
 
@@ -10,7 +10,7 @@ All requests use CPA host HTTP callbacks. Inference propagates `host_callback_id
 
 The original plugin and this fork must **not both be enabled**, because both claim the same provider. Install/enable and production acceptance are separate from building this deliverable. See [config.example.yaml](config.example.yaml) for a configuration fragment; it is not automatically applied.
 
-Authentication uses **OpenCode Go API keys**, configured under `plugins.configs.opencode-go-unified.api-keys`. The plugin does not implement browser OAuth. It no longer registers CPA's combined `AuthProvider` capability, which previously made CPA display an OAuth login card whose unsupported login handler returned HTTP 500. After installing this fix, refresh the management page; add or change subscription keys in the plugin configuration instead of using OAuth login.
+Authentication uses **OpenCode Go API keys**, configured under `plugins.configs.opencode-go-omni.api-keys`. The plugin does not implement browser OAuth. It no longer registers CPA's combined `AuthProvider` capability, which previously made CPA display an OAuth login card whose unsupported login handler returned HTTP 500. After installing this fix, refresh the management page; add or change subscription keys in the plugin configuration instead of using OAuth login.
 
 CPA's normal file credential loader continues to load plugin-generated files containing `"type": "opencode-go"`. The executor reads only the credential selected by CPA: historical `AuthAttributes.api_key`, then `AuthMetadata.api_key`, then the raw `StorageJSON` field. A present but invalid source is rejected, and the executor never substitutes the first configured key. Provider identity, four protocol routes, scheduling, and the quota page remain separate from OAuth login. The SDK's internal executor scope value `oauth` means credential-bound model registration here; it does not implement an OAuth exchange.
 
@@ -127,29 +127,29 @@ Build the dynamic shared library for your platform:
 
 ### Windows (AMD64)
 ```powershell
-go build -buildmode=c-shared -o plugins/windows/amd64/opencode-go-unified.dll .
+go build -buildmode=c-shared -o plugins/windows/amd64/opencode-go-omni.dll .
 ```
 
 ### Linux (AMD64)
 ```bash
-go build -buildmode=c-shared -o plugins/linux/amd64/opencode-go-unified.so .
+go build -buildmode=c-shared -o plugins/linux/amd64/opencode-go-omni.so .
 ```
 
 ### macOS (ARM64)
 ```bash
-go build -buildmode=c-shared -o plugins/darwin/arm64/opencode-go-unified.dylib .
+go build -buildmode=c-shared -o plugins/darwin/arm64/opencode-go-omni.dylib .
 ```
 
 Place the compiled binary into your CLIProxyAPI plugin directory (e.g. `<cliproxyapi_root>/plugins/<os>/<arch>/`).
 
 ## Configuration
 
-Configure the plugin in your CLIProxyAPI `config.yaml` under `plugins.configs.opencode-go-unified`:
+Configure the plugin in your CLIProxyAPI `config.yaml` under `plugins.configs.opencode-go-omni`:
 
 ```yaml
 plugins:
   configs:
-    opencode-go-unified:
+    opencode-go-omni:
       # Upstream base URL (default: "https://opencode.ai/inference/go/v1")
       base-url: "https://opencode.ai/inference/go/v1"
 
