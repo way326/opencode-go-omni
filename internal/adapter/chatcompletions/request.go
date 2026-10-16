@@ -114,7 +114,8 @@ func isValidThinking(raw json.RawMessage) bool {
 }
 
 type imageURLField struct {
-	URL string `json:"url"`
+	URL    string `json:"url"`
+	Detail string `json:"detail,omitempty"`
 }
 
 type ccContentPart struct {
@@ -376,22 +377,31 @@ func responsesToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSu
 	if eErr != nil {
 		return nil, eErr
 	}
+	imageBridge, eErr := planToolImageBridge(items)
+	if eErr != nil {
+		return nil, eErr
+	}
 	kind, tcName, eErr := shared.DecodeToolChoice(src.ToolChoice)
 	if eErr != nil {
 		return nil, eErr
 	}
 	applyToolChoiceCC(out, kind, tcName)
 	pendingReasoning := ""
+	callMessageIndexes := map[int]int{}
 	lastAssistantCarriesReasoning := false
 	flushReasoning := func() {
 		if pendingReasoning == "" {
 			return
 		}
-		out.Messages = append(out.Messages, ccMessage{Role: "assistant", ReasoningContent: pendingReasoning})
+		// Without tool calls, keep content present rather than null while
+		// preserving an interrupted reasoning-only turn verbatim.
+		out.Messages = append(out.Messages, ccMessage{
+			Role: "assistant", Content: "", ReasoningContent: pendingReasoning,
+		})
 		pendingReasoning = ""
 		lastAssistantCarriesReasoning = true
 	}
-	for _, item := range items {
+	for itemIndex, item := range items {
 		switch item.Type {
 		case "message":
 			content, eErr := respContent(item.Content)
@@ -425,6 +435,9 @@ func responsesToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSu
 				lastAssistantCarriesReasoning = false
 			case "assistant":
 				if content != nil || pendingReasoning != "" {
+					if content == nil && pendingReasoning != "" {
+						content = ""
+					}
 					out.Messages = append(out.Messages, ccMessage{Role: item.Role, Content: content, ReasoningContent: pendingReasoning})
 					lastAssistantCarriesReasoning = pendingReasoning != ""
 					pendingReasoning = ""
@@ -448,27 +461,42 @@ func responsesToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSu
 					last.ReasoningContent += pendingReasoning
 					pendingReasoning = ""
 					last.ToolCalls = append(last.ToolCalls, tc)
+					callMessageIndexes[itemIndex] = n - 1
 					continue
 				}
 			}
 			out.Messages = append(out.Messages, ccMessage{
 				Role: "assistant", ReasoningContent: pendingReasoning, ToolCalls: []shared.CCToolCall{tc},
 			})
+			callMessageIndexes[itemIndex] = len(out.Messages) - 1
 			lastAssistantCarriesReasoning = pendingReasoning != ""
 			pendingReasoning = ""
 		case "function_call_output", "custom_tool_call_output":
 			flushReasoning()
-			text, eErr := shared.RespOutputText(item.Output, "tool messages carry text only")
-			if eErr != nil {
-				return nil, eErr
+			text, hasImage := imageBridge.outputs[itemIndex]
+			if !hasImage {
+				var eErr *errclass.Error
+				text, eErr = shared.RespOutputText(item.Output, "tool messages carry text only")
+				if eErr != nil {
+					return nil, eErr
+				}
 			}
 			out.Messages = append(out.Messages, ccMessage{
 				Role: "tool", Content: text, ToolCallID: item.CallID,
 			})
+			out.Messages = append(out.Messages, imageBridge.attachments[itemIndex]...)
 			lastAssistantCarriesReasoning = false
 		case "reasoning":
 			if isDeepSeekModel(upstreamModel) {
-				pendingReasoning += reasoningItemText(item)
+				if target, ok := imageBridge.reasoningTargets[itemIndex]; ok {
+					index := callMessageIndexes[target]
+					out.Messages[index].ReasoningContent += reasoningItemText(item)
+					if index == len(out.Messages)-1 {
+						lastAssistantCarriesReasoning = true
+					}
+				} else {
+					pendingReasoning += reasoningItemText(item)
+				}
 			}
 		default:
 			return nil, shared.UnsupportedInputItemType(item.Type)
