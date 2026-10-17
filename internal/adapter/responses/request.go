@@ -73,90 +73,19 @@ func fromResponsesNormalized(upstreamModel string, sourceBody []byte, tools ...*
 
 	// Verbatim raw input preservation: decode input as raw messages so
 	// unmodeled fields (web_search_call action/status, reasoning
-	// summary/encrypted_content) survive byte-for-byte.
+	// summary/encrypted_content) survive byte-for-byte. The same items
+	// feed the shared normalizer first, so namespaced and custom history
+	// identities are registered (and their wire names flattened) before
+	// any raw rewrite; the rewrite below then touches only the fields the
+	// conversion owns and leaves every other member of the raw item intact.
 	preserved := make([]json.RawMessage, 0)
 	inputTouched := false
+	toolReq := &shared.ResponsesRequest{Tools: src.Tools, ToolChoice: src.ToolChoice}
 	if inputRaw, ok := raw["input"]; ok && len(inputRaw) > 0 && string(inputRaw) != "null" {
 		var items []json.RawMessage
 		if err := json.Unmarshal(inputRaw, &items); err == nil {
 			inputTouched = true
-			for _, item := range items {
-				var meta struct {
-					Type string `json:"type"`
-				}
-				_ = json.Unmarshal(item, &meta)
-				switch meta.Type {
-				case "additional_tools":
-					var at struct {
-						Tools []shared.RespTool `json:"tools"`
-					}
-					if err := json.Unmarshal(item, &at); err != nil {
-						return nil, errclass.Translation("additional_tools requires a tools array")
-					}
-					if at.Tools == nil {
-						return nil, errclass.Translation("additional_tools requires a tools array")
-					}
-					src.Tools = append(src.Tools, at.Tools...)
-				case "custom_tool_call":
-					var m map[string]json.RawMessage
-					if err := json.Unmarshal(item, &m); err != nil {
-						return nil, errclass.Translation("invalid Responses request body: malformed JSON")
-					}
-					typeBytes, _ := json.Marshal("function_call")
-					m["type"] = typeBytes
-					if inRaw, ok := m["input"]; ok {
-						var s string
-						var argsStr string
-						if json.Unmarshal(inRaw, &s) == nil {
-							b, _ := json.Marshal(map[string]string{"input": s})
-							argsStr = string(b)
-						} else {
-							b, _ := json.Marshal(map[string]json.RawMessage{"input": inRaw})
-							argsStr = string(b)
-						}
-						ab, _ := json.Marshal(argsStr)
-						m["arguments"] = ab
-						delete(m, "input")
-					}
-					b, err := json.Marshal(m)
-					if err != nil {
-						return nil, errclass.Translation("failed to encode normalized Responses request: " + err.Error())
-					}
-					preserved = append(preserved, b)
-				case "custom_tool_call_output":
-					var m map[string]json.RawMessage
-					if err := json.Unmarshal(item, &m); err != nil {
-						return nil, errclass.Translation("invalid Responses request body: malformed JSON")
-					}
-					typeBytes, _ := json.Marshal("function_call_output")
-					m["type"] = typeBytes
-					b, err := json.Marshal(m)
-					if err != nil {
-						return nil, errclass.Translation("failed to encode normalized Responses request: " + err.Error())
-					}
-					preserved = append(preserved, b)
-				case "compaction", "reasoning":
-					// Dropped: non-GPT upstreams reject historical reasoning and compaction blobs.
-				case "function_call":
-					var m map[string]json.RawMessage
-					if err := json.Unmarshal(item, &m); err != nil {
-						return nil, errclass.Translation("invalid Responses request body: malformed JSON")
-					}
-					var args string
-					if rawArgs, ok := m["arguments"]; ok {
-						_ = json.Unmarshal(rawArgs, &args)
-					}
-					ab, _ := json.Marshal(shared.DefaultArgs(args))
-					m["arguments"] = ab
-					b, err := json.Marshal(m)
-					if err != nil {
-						return nil, errclass.Translation("failed to encode normalized Responses request: " + err.Error())
-					}
-					preserved = append(preserved, b)
-				default:
-					preserved = append(preserved, item)
-				}
-			}
+			toolReq.Input = inputRaw
 		} else {
 			var s string
 			if json.Unmarshal(inputRaw, &s) != nil {
@@ -166,12 +95,93 @@ func fromResponsesNormalized(upstreamModel string, sourceBody []byte, tools ...*
 	}
 
 	rt := shared.ResponseToolContext(tools)
-	toolReq := &shared.ResponsesRequest{Tools: src.Tools, ToolChoice: src.ToolChoice}
-	if _, eErr := rt.Normalize(toolReq, EndpointPath); eErr != nil {
+	conv, eErr := rt.Normalize(toolReq, EndpointPath)
+	if eErr != nil {
 		return nil, eErr
 	}
 	src.Tools = toolReq.Tools
 	src.ToolChoice = toolReq.ToolChoice
+
+	if inputTouched {
+		var items []json.RawMessage
+		if err := json.Unmarshal(toolReq.Input, &items); err != nil {
+			return nil, errclass.Translation("invalid Responses request body: malformed JSON")
+		}
+		// conv holds one typed item per raw item that reaches the upstream
+		// (additional_tools merge into the tool list), in the same order,
+		// so the wire name, the namespace flattening, and the custom input
+		// wrapper all come from the shared classifier.
+		ci := 0
+		for _, item := range items {
+			var meta struct {
+				Type string `json:"type"`
+			}
+			_ = json.Unmarshal(item, &meta)
+			if meta.Type == "additional_tools" {
+				continue
+			}
+			var cv shared.RespItem
+			if ci < len(conv) {
+				cv = conv[ci]
+			}
+			ci++
+			switch meta.Type {
+			case "custom_tool_call":
+				var m map[string]json.RawMessage
+				if err := json.Unmarshal(item, &m); err != nil {
+					return nil, errclass.Translation("invalid Responses request body: malformed JSON")
+				}
+				typeBytes, _ := json.Marshal("function_call")
+				m["type"] = typeBytes
+				if cv.Name != "" {
+					nameBytes, _ := json.Marshal(cv.Name)
+					m["name"] = nameBytes
+				}
+				argsBytes, _ := json.Marshal(cv.Arguments)
+				m["arguments"] = argsBytes
+				delete(m, "input")
+				delete(m, "namespace")
+				b, err := json.Marshal(m)
+				if err != nil {
+					return nil, errclass.Translation("failed to encode normalized Responses request: " + err.Error())
+				}
+				preserved = append(preserved, b)
+			case "custom_tool_call_output":
+				var m map[string]json.RawMessage
+				if err := json.Unmarshal(item, &m); err != nil {
+					return nil, errclass.Translation("invalid Responses request body: malformed JSON")
+				}
+				typeBytes, _ := json.Marshal("function_call_output")
+				m["type"] = typeBytes
+				b, err := json.Marshal(m)
+				if err != nil {
+					return nil, errclass.Translation("failed to encode normalized Responses request: " + err.Error())
+				}
+				preserved = append(preserved, b)
+			case "compaction", "reasoning":
+				// Dropped: non-GPT upstreams reject historical reasoning and compaction blobs.
+			case "function_call":
+				var m map[string]json.RawMessage
+				if err := json.Unmarshal(item, &m); err != nil {
+					return nil, errclass.Translation("invalid Responses request body: malformed JSON")
+				}
+				ab, _ := json.Marshal(shared.DefaultArgs(cv.Arguments))
+				m["arguments"] = ab
+				if cv.Name != "" {
+					nameBytes, _ := json.Marshal(cv.Name)
+					m["name"] = nameBytes
+				}
+				delete(m, "namespace")
+				b, err := json.Marshal(m)
+				if err != nil {
+					return nil, errclass.Translation("failed to encode normalized Responses request: " + err.Error())
+				}
+				preserved = append(preserved, b)
+			default:
+				preserved = append(preserved, item)
+			}
+		}
+	}
 
 	modelBytes, _ := json.Marshal(upstreamModel)
 	raw["model"] = modelBytes

@@ -74,9 +74,11 @@ func ConvertNonStreamResponse(sourceFormat string, status int, upstreamBody []by
 	}
 }
 
-// restoreCustomPassthrough rewrites function_call output items for custom
-// tools into their custom_tool_call shape on the native passthrough path;
-// bodies without output arrays or custom tools pass through untouched.
+// restoreCustomPassthrough rewrites function_call output items on the
+// native passthrough path: a name flattened from a namespace tool regains
+// its original name and namespace, and items for tools originally declared
+// as custom restore to their custom_tool_call shape with unwrapped input.
+// Bodies without output arrays or rewritable items pass through untouched.
 func restoreCustomPassthrough(body []byte, rt *shared.ResponseTools) []byte {
 	var doc map[string]any
 	if err := json.Unmarshal(body, &doc); err != nil {
@@ -89,11 +91,23 @@ func restoreCustomPassthrough(body []byte, rt *shared.ResponseTools) []byte {
 	changed := false
 	for _, entry := range raw {
 		item, ok := entry.(map[string]any)
-		if !ok || item["type"] != "function_call" {
+		if !ok {
+			continue
+		}
+		typ, _ := item["type"].(string)
+		if typ != "function_call" && typ != "custom_tool_call" {
 			continue
 		}
 		name, _ := item["name"].(string)
-		if !rt.IsCustom(name) {
+		// A registered namespace child was flattened to its wire name for
+		// the upstream; restore the client-facing pair. Unknown names keep
+		// whatever the upstream sent (including an own namespace field).
+		if plain, namespace := rt.RestoreWire(name); namespace != "" {
+			item["name"] = plain
+			item["namespace"] = namespace
+			changed = true
+		}
+		if typ != "function_call" || !rt.IsCustom(name) {
 			continue
 		}
 		args, _ := item["arguments"].(string)

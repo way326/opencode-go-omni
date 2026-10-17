@@ -3,6 +3,7 @@ package responses
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/way326/opencode-go-omni/internal/adapter/shared"
 	"github.com/way326/opencode-go-omni/internal/errclass"
@@ -26,6 +27,10 @@ type StreamConverter struct {
 	// response.function_call_arguments.done carrying only item_id (no
 	// name) still restores to custom_tool_call_input.done.
 	customItems map[string]struct{}
+	// customInputs accumulates the wrapped arguments streamed for a custom
+	// item so client input deltas carry only unwrapped input, never the
+	// upstream {"input":"..."} JSON envelope fragments.
+	customInputs map[string]*customInputState
 
 	// Response identity captured from response.created.
 	id      string
@@ -57,12 +62,13 @@ func NewStreamConverter(sourceFormat string, tools ...*shared.ResponseTools) *St
 		// embed raw newlines from legally multi-data-line frames and
 		// corrupt native framing. Conversion targets parse the joined
 		// payload and never read raw.
-		framer:      shared.NewSSEFramer(sourceFormat == "openai-response"),
-		source:      sourceFormat,
-		id:          "opencode-go",
-		textIndex:   -1,
-		respTools:   shared.ResponseToolContext(tools),
-		customItems: map[string]struct{}{},
+		framer:       shared.NewSSEFramer(sourceFormat == "openai-response"),
+		source:       sourceFormat,
+		id:           "opencode-go",
+		textIndex:    -1,
+		respTools:    shared.ResponseToolContext(tools),
+		customItems:  map[string]struct{}{},
+		customInputs: map[string]*customInputState{},
 	}
 	sc.tracker = newToolCallTracker(sc.allocIndex)
 	return sc
@@ -99,6 +105,15 @@ type toolCallTracker struct {
 type toolCallState struct {
 	index     int
 	delivered bool
+}
+
+// customInputState accumulates one custom tool call's upstream arguments
+// and records how much unwrapped input already reached the client, so a
+// partial JSON envelope is never emitted and later fragments only emit
+// their newly available tail.
+type customInputState struct {
+	acc     strings.Builder
+	emitted int
 }
 
 func newToolCallTracker(alloc func() int) *toolCallTracker {
@@ -378,6 +393,11 @@ func (sc *StreamConverter) convertEvent(eventType, payload string) ([][]byte, bo
 func (sc *StreamConverter) passthroughEvent(eventType, payload string, raw []byte) ([][]byte, bool, *errclass.Error) {
 	switch eventType {
 	case "response.completed", "response.incomplete":
+		if sc.respTools != nil {
+			if rewritten, ok := sc.restoreCompletedOutput(eventType, payload); ok {
+				return [][]byte{rewritten}, true, nil
+			}
+		}
 		return [][]byte{raw}, true, nil
 	case "response.failed", "error":
 		var ev failureEvent
@@ -385,7 +405,20 @@ func (sc *StreamConverter) passthroughEvent(eventType, payload string, raw []byt
 		return nil, false, failureError(&ev)
 	case "response.output_item.added", "response.output_item.done":
 		if sc.respTools != nil {
-			if rewritten, ok := sc.restoreCustomItem(eventType, payload); ok {
+			if rewritten, ok := sc.restoreItem(eventType, payload); ok {
+				return [][]byte{rewritten}, false, nil
+			}
+		}
+		return [][]byte{raw}, false, nil
+	case "response.function_call_arguments.delta":
+		if sc.respTools != nil {
+			if rewritten, ok := sc.restoreCustomInputDelta(payload); ok {
+				if rewritten == nil {
+					// Recognized custom item whose JSON envelope has not
+					// unwrapped yet: nothing is reportable, and the raw
+					// wrapper fragment must not reach the client.
+					return nil, false, nil
+				}
 				return [][]byte{rewritten}, false, nil
 			}
 		}
@@ -402,10 +435,52 @@ func (sc *StreamConverter) passthroughEvent(eventType, payload string, raw []byt
 	}
 }
 
-// restoreCustomItem rewrites a function_call output item for a custom tool
-// into its custom_tool_call shape; non-custom items report false so the
-// caller falls back to verbatim passthrough.
-func (sc *StreamConverter) restoreCustomItem(eventType, payload string) ([]byte, bool) {
+// restoreOutputItem applies the passthrough item rewrite in place and
+// reports whether anything changed: a name flattened from a namespace tool
+// regains its original name and namespace, and a function_call item for a
+// tool originally declared as custom restores to its custom_tool_call
+// shape. announce marks the output_item.added announcement, whose custom
+// input is intentionally empty until the arguments complete; every other
+// site carries the unwrapped complete input.
+func (sc *StreamConverter) restoreOutputItem(item map[string]any, announce bool) bool {
+	typ, _ := item["type"].(string)
+	if typ != "function_call" && typ != "custom_tool_call" {
+		return false
+	}
+	name, _ := item["name"].(string)
+	changed := false
+	if plain, namespace := sc.respTools.RestoreWire(name); namespace != "" {
+		item["name"] = plain
+		item["namespace"] = namespace
+		changed = true
+	}
+	if typ == "function_call" && sc.respTools.IsCustom(name) {
+		args, _ := item["arguments"].(string)
+		item["type"] = "custom_tool_call"
+		if announce {
+			item["input"] = ""
+		} else {
+			item["input"] = shared.UnwrapCustomToolInput(args)
+		}
+		delete(item, "arguments")
+		changed = true
+		// Remember both item identifiers: a later
+		// response.function_call_arguments.delta/.done may reference the
+		// item by item_id alone without repeating the tool name.
+		if id, _ := item["id"].(string); id != "" {
+			sc.customItems[id] = struct{}{}
+		}
+		if id, _ := item["call_id"].(string); id != "" {
+			sc.customItems[id] = struct{}{}
+		}
+	}
+	return changed
+}
+
+// restoreItem rewrites one output_item event through the shared item
+// rewrite; items needing no rewrite report false so the caller falls back
+// to verbatim passthrough.
+func (sc *StreamConverter) restoreItem(eventType, payload string) ([]byte, bool) {
 	var doc map[string]any
 	if err := json.Unmarshal([]byte(payload), &doc); err != nil {
 		return nil, false
@@ -414,37 +489,85 @@ func (sc *StreamConverter) restoreCustomItem(eventType, payload string) ([]byte,
 	if !ok {
 		return nil, false
 	}
-	typ, _ := item["type"].(string)
-	if typ != "function_call" {
+	if !sc.restoreOutputItem(item, eventType == "response.output_item.added") {
 		return nil, false
-	}
-	name, _ := item["name"].(string)
-	if !sc.respTools.IsCustom(name) {
-		return nil, false
-	}
-	args, _ := item["arguments"].(string)
-	item["type"] = "custom_tool_call"
-	if eventType == "response.output_item.added" {
-		item["input"] = ""
-	} else {
-		item["input"] = shared.UnwrapCustomToolInput(args)
-	}
-	delete(item, "arguments")
-	// Remember both item identifiers: a later
-	// response.function_call_arguments.done may reference the item by
-	// item_id alone without repeating the tool name.
-	if id, _ := item["id"].(string); id != "" {
-		sc.customItems[id] = struct{}{}
-	}
-	if id, _ := item["call_id"].(string); id != "" {
-		sc.customItems[id] = struct{}{}
 	}
 	return shared.SSEEvent(eventType, doc), true
 }
 
+// restoreCompletedOutput applies the same item rewrite to the terminal
+// response object's output array, so the client's final response matches
+// the item events it just consumed (the sibling Chat Completions route
+// renders its terminal output the same way). Frames whose output needs no
+// rewrite stay byte-identical.
+func (sc *StreamConverter) restoreCompletedOutput(eventType, payload string) ([]byte, bool) {
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(payload), &doc); err != nil {
+		return nil, false
+	}
+	resp, ok := doc["response"].(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	items, ok := resp["output"].([]any)
+	if !ok {
+		return nil, false
+	}
+	changed := false
+	for _, entry := range items {
+		item, ok := entry.(map[string]any)
+		if !ok {
+			continue
+		}
+		if sc.restoreOutputItem(item, false) {
+			changed = true
+		}
+	}
+	if !changed {
+		return nil, false
+	}
+	return shared.SSEEvent(eventType, doc), true
+}
+
+// restoreCustomInputDelta rewrites a function_call_arguments.delta event
+// for a custom tool into its custom_tool_call_input.delta shape. The
+// upstream streams the required string input wrapped in a JSON object
+// ({"input":"..."}), so only the newly unwrapped tail is emitted and raw
+// wrapper tokens never reach client input deltas. It reports ok=false for
+// items not known to be custom (verbatim passthrough) and ok=true with a
+// nil frame while the envelope is still incomplete or the input is empty.
+func (sc *StreamConverter) restoreCustomInputDelta(payload string) ([]byte, bool) {
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(payload), &doc); err != nil {
+		return nil, false
+	}
+	id, _ := doc["item_id"].(string)
+	if id == "" {
+		return nil, false
+	}
+	if _, custom := sc.customItems[id]; !custom {
+		return nil, false
+	}
+	delta, _ := doc["delta"].(string)
+	st := sc.customInputs[id]
+	if st == nil {
+		st = &customInputState{}
+		sc.customInputs[id] = st
+	}
+	st.acc.WriteString(delta)
+	tail := shared.CustomInputTail(st.acc.String(), &st.emitted)
+	if tail == "" {
+		return nil, true
+	}
+	doc["type"] = "response.custom_tool_call_input.delta"
+	doc["delta"] = tail
+	return shared.SSEEvent("response.custom_tool_call_input.delta", doc), true
+}
+
 // restoreCustomInputDone rewrites a function_call_arguments.done event for
-// a custom tool into its custom_tool_call_input.done shape; non-custom
-// events report false so the caller falls back to verbatim passthrough.
+// a custom tool into its custom_tool_call_input.done shape, preserving the
+// item identifiers and any other upstream event members; non-custom events
+// report false so the caller falls back to verbatim passthrough.
 func (sc *StreamConverter) restoreCustomInputDone(payload string) ([]byte, bool) {
 	var doc map[string]any
 	if err := json.Unmarshal([]byte(payload), &doc); err != nil {
@@ -463,17 +586,11 @@ func (sc *StreamConverter) restoreCustomInputDone(payload string) ([]byte, bool)
 		return nil, false
 	}
 	args, _ := doc["arguments"].(string)
-	out := map[string]any{
-		"type":  "response.custom_tool_call_input.done",
-		"input": shared.UnwrapCustomToolInput(args),
-	}
-	if v, ok := doc["item_id"]; ok {
-		out["item_id"] = v
-	}
-	if v, ok := doc["output_index"]; ok {
-		out["output_index"] = v
-	}
-	return shared.SSEEvent("response.custom_tool_call_input.done", out), true
+	delete(doc, "arguments")
+	delete(doc, "name")
+	doc["type"] = "response.custom_tool_call_input.done"
+	doc["input"] = shared.UnwrapCustomToolInput(args)
+	return shared.SSEEvent("response.custom_tool_call_input.done", doc), true
 }
 
 // textDelta emits one output text delta: a plain Chat Completions content

@@ -330,10 +330,11 @@ func TestOmenAlphaCompatibilityFallbackDiagnostics(t *testing.T) {
 }
 
 // TestExactCompatibilityTableStaysMinimal pins the exact table to the IDs with
-// a documented reason: the two provider-default qwen IDs and the single
-// unlisted omen-alpha entry. A family prefix must not be used for any of them.
+// a documented reason: the two provider-default qwen IDs, the unlisted
+// omen-alpha entry, and the provider-default beam-free ID. A family prefix
+// must not be used for any of them.
 func TestExactCompatibilityTableStaysMinimal(t *testing.T) {
-	want := map[string]bool{"qwen3.6-plus": true, "qwen3.7-max": true, "omen-alpha": true}
+	want := map[string]bool{"qwen3.6-plus": true, "qwen3.7-max": true, "omen-alpha": true, "beam-free": true}
 	if len(exactRoutes) != len(want) {
 		t.Fatalf("exactRoutes = %+v, want %d entries", exactRoutes, len(want))
 	}
@@ -346,8 +347,8 @@ func TestExactCompatibilityTableStaysMinimal(t *testing.T) {
 		}
 	}
 	for _, p := range prefixRoutes {
-		if p.prefix == "omen" {
-			t.Error(`prefixRoutes contains a bare "omen" prefix; omen-alpha is an exact entry`)
+		if p.prefix == "omen" || p.prefix == "beam" {
+			t.Errorf("prefixRoutes contains %q; the supported model is an exact entry", p.prefix)
 		}
 	}
 	if _, ok := exactRoute("omen-unknown"); ok {

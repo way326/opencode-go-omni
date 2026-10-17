@@ -29,6 +29,21 @@ type anthropicTool struct {
 	InputSchema json.RawMessage `json:"input_schema"`
 }
 
+// anthropicThinking is the outbound Messages thinking control. Only the
+// "enabled" form carries a budget; "adaptive" and "disabled" must not emit
+// budget_tokens at all, which the shared decode-only ClaudeThinking type
+// (untagged budget_tokens) would force onto every request.
+type anthropicThinking struct {
+	Type         string `json:"type"`
+	BudgetTokens int64  `json:"budget_tokens,omitempty"`
+}
+
+// anthropicOutputConfig is the outbound output_config object; the pinned
+// adaptive profile receives its effort here instead of as a budget.
+type anthropicOutputConfig struct {
+	Effort string `json:"effort,omitempty"`
+}
+
 // messagesRequest is the outbound Anthropic encode shape — intentionally
 // divergent from shared.ClaudeTool decode type: typed stop sequences +
 // named items vs raw-ignore + tool_choice.
@@ -40,7 +55,8 @@ type messagesRequest struct {
 	StopSequences []string               `json:"stop_sequences,omitempty"`
 	Tools         []anthropicTool        `json:"tools,omitempty"`
 	ToolChoice    any                    `json:"tool_choice,omitempty"` // {type,name?,disable_parallel_tool_use?}
-	Thinking      *shared.ClaudeThinking `json:"thinking,omitempty"`
+	Thinking      *anthropicThinking     `json:"thinking,omitempty"`
+	OutputConfig  *anthropicOutputConfig `json:"output_config,omitempty"`
 	Stream        bool                   `json:"stream,omitempty"`
 	Temperature   *float64               `json:"temperature,omitempty"`
 	TopP          *float64               `json:"top_p,omitempty"`
@@ -305,20 +321,75 @@ func (b *msgBuilder) flush() {
 }
 
 // finalize assembles the shared envelope fields, resolves the client
-// reasoning effort to a thinking budget via the model's declared
-// capability (FR-005: unsupported levels are rejected explicitly, never
-// dropped), and encodes the request.
+// reasoning effort onto the thinking control the target model accepts
+// (FR-005: unsupported levels are rejected explicitly, never dropped),
+// and encodes the request. The pinned adaptive profile converts the
+// effort itself; every other model keeps the budget protocol.
 func finalize(req *messagesRequest, system []string, effort string, ts *pluginapi.ThinkingSupport) ([]byte, *errclass.Error) {
 	req.System = systemField(system)
 	if req.Messages == nil {
 		req.Messages = []anthropicMessage{}
 	}
 	if effort != "" {
-		budget, _ := thinking.BudgetFromEffort(effort, ts)
-		applyThinking(req, budget)
+		if adaptiveThinkingProfile(req.Model) {
+			applyAdaptiveThinking(req, effort)
+		} else {
+			budget, _ := thinking.BudgetFromEffort(effort, ts)
+			applyThinking(req, budget)
+		}
 	}
 	b, _ := json.Marshal(req) // only marshallable composed types; cannot fail
 	return b, nil
+}
+
+// adaptiveThinkingProfile reports whether the resolved upstream model is the
+// pinned Claude profile whose Messages endpoint rejects thinking.type
+// "enabled" outright. Live evidence (run 84cb60c9) returned HTTP 400
+// '"thinking.type.enabled" is not supported for this model. Use
+// "thinking.type.adaptive" and "output_config.effort"', and the models.dev
+// snapshot for the same ID declares reasoning_options toggle + effort
+// (low/medium/high/xhigh/max). The match is an exact ID on purpose: sibling
+// Claude-family and minimax/qwen models on this route accept the budget form
+// today, and a wider gate would silently change them.
+func adaptiveThinkingProfile(upstreamModel string) bool {
+	return strings.EqualFold(strings.TrimSpace(upstreamModel), "claude-haiku-5-5")
+}
+
+// applyAdaptiveThinking maps a client effort onto the pinned profile's adaptive
+// controls. Declared effort values pass through verbatim to
+// output_config.effort; the two values outside the declared set map explicitly:
+//
+//   - "none" is an explicit off state and becomes thinking.type=disabled.
+//     The profile declares a thinking toggle, and omitting the field would let
+//     the upstream default silently re-enable reasoning against an opt-out.
+//   - "auto" (dynamic) becomes adaptive without an effort override, the
+//     upstream-default form (CPA's Claude applier emits the same for auto).
+//   - "minimal" has no adaptive equivalent below the declared floor, so it
+//     takes that floor "low": a client asking for the weakest reasoning never
+//     gets more than the weakest reasoning, and never gets it dropped.
+//
+// Unknown values keep the historical omission (transparent router: the
+// upstream is the sole authority). Sampling controls are dropped whenever
+// adaptive thinking is active, matching the budget path.
+func applyAdaptiveThinking(req *messagesRequest, effort string) {
+	level := strings.ToLower(strings.TrimSpace(effort))
+	if level == "none" {
+		req.Thinking = &anthropicThinking{Type: "disabled"}
+		return
+	}
+	switch level {
+	case "auto":
+		req.Thinking = &anthropicThinking{Type: "adaptive"}
+	case "minimal":
+		req.Thinking = &anthropicThinking{Type: "adaptive"}
+		req.OutputConfig = &anthropicOutputConfig{Effort: "low"}
+	case "low", "medium", "high", "xhigh", "max":
+		req.Thinking = &anthropicThinking{Type: "adaptive"}
+		req.OutputConfig = &anthropicOutputConfig{Effort: level}
+	default:
+		return
+	}
+	req.Temperature, req.TopP = nil, nil
 }
 
 // applyThinking maps a resolved budget onto the Messages thinking field.
@@ -333,7 +404,7 @@ func applyThinking(req *messagesRequest, budget int64) {
 	if budget <= 0 {
 		return
 	}
-	req.Thinking = &shared.ClaudeThinking{Type: "enabled", BudgetTokens: budget}
+	req.Thinking = &anthropicThinking{Type: "enabled", BudgetTokens: budget}
 	req.Temperature, req.TopP = nil, nil
 	if req.MaxTokens <= budget {
 		req.MaxTokens = budget + 1024 // budget_tokens must be < max_tokens

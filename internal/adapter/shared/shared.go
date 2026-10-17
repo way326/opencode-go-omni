@@ -1153,6 +1153,19 @@ type RespItem struct {
 	Tools     []RespTool      `json:"tools,omitempty"`
 }
 
+// MarshalJSON preserves the required input field of a custom call even when
+// the code is empty. Other item kinds keep their existing optional fields.
+func (item RespItem) MarshalJSON() ([]byte, error) {
+	type wireItem RespItem
+	if item.Type == "custom_tool_call" {
+		return json.Marshal(struct {
+			wireItem
+			Input string `json:"input"`
+		}{wireItem: wireItem(item), Input: item.Input})
+	}
+	return json.Marshal(wireItem(item))
+}
+
 // RespSummary is one Responses reasoning summary part.
 type RespSummary struct {
 	Type string `json:"type,omitempty"`

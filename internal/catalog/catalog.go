@@ -230,11 +230,15 @@ const omenAlphaNote = `model "omen-alpha" routed via compatibility fallback (cha
 // default @ai-sdk/openai-compatible (Chat Completions), while every other qwen
 // ID carries @ai-sdk/anthropic (Messages) — only those two are corrected.
 // omen-alpha is the single ID absent from metadata (see omenAlphaNote).
+// beam-free appears in the 2026-10-17 live catalog and models.dev snapshot;
+// its absent npm override inherits the provider's Chat Completions default.
+// Pin this exact ID rather than assuming a protocol for future beam variants.
 var exactRoutes = []struct {
 	id    string
 	route Route
 	note  string
 }{
+	{"beam-free", RouteChatCompletions, ""},
 	{"qwen3.6-plus", RouteChatCompletions, ""},
 	{"qwen3.7-max", RouteChatCompletions, ""},
 	{"omen-alpha", RouteChatCompletions, omenAlphaNote},

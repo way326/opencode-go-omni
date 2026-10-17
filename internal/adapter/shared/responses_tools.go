@@ -65,6 +65,21 @@ func (t *ResponseTools) IsCustom(name string) bool {
 	return false
 }
 
+// RestoreWire returns the original tool name and namespace for a flattened
+// upstream name. Unknown wire names pass through without a namespace.
+func (t *ResponseTools) RestoreWire(name string) (string, string) {
+	id := t.Identity(name)
+	return id.name, id.namespace
+}
+
+// WrapCustomToolInput is the request-side inverse of UnwrapCustomToolInput.
+// Always wrap once, even when input itself is JSON or empty: custom input is
+// opaque text, not a pre-encoded function arguments object.
+func WrapCustomToolInput(input string) string {
+	args, _ := json.Marshal(map[string]string{"input": input})
+	return string(args)
+}
+
 // UnwrapCustomToolInput extracts the input string from custom tool call
 // arguments: a JSON object with properties like "input", "code", or "arguments"
 // unwraps to that raw string value, otherwise the arguments pass through verbatim.
@@ -104,11 +119,20 @@ func qualifiedToolName(name, namespace string) string {
 	return qualified
 }
 
+// QualifyName returns the same bounded wire name used by Normalize for a
+// namespaced tool. Plain names remain unchanged.
+func QualifyName(name, namespace string) string {
+	if namespace == "" {
+		return name
+	}
+	return qualifiedToolName(name, namespace)
+}
+
 // normalizeCustomTool drops client-only tools (apply_patch, tool_search,
 // image_generation) and, on translated routes, hosted web search tools
 // (web_search, web_search_preview) with no function-calling equivalent. It
-// rewrites generic custom tools to functions with a default empty-object
-// parameters schema. It reports false when the tool must be dropped.
+// rewrites generic custom tools to functions with a required string input
+// wrapper. It reports false when the tool must be dropped.
 func normalizeCustomTool(tool *RespTool, target string) bool {
 	if tool.Type == "custom" && tool.Name == "apply_patch" {
 		return false
@@ -122,8 +146,9 @@ func normalizeCustomTool(tool *RespTool, target string) bool {
 	}
 	if tool.Type == "custom" {
 		tool.Type = "function"
-		if len(tool.Parameters) == 0 {
-			tool.Parameters = json.RawMessage(`{"type":"object","properties":{},"additionalProperties":true}`)
+		if !HasContent(tool.Parameters) {
+			tool.Parameters = json.RawMessage(`{"type":"object","properties":{"input":{"type":"string"}},"required":["input"],"additionalProperties":false}`)
+			tool.Description += "\n\nUpstream transport: call this as a JSON function with one required string property named input. Preserve the raw tool text exactly inside input. The original freeform or grammar instructions apply to the contents of input, not to the surrounding JSON object."
 		}
 	}
 	return true
@@ -131,7 +156,8 @@ func normalizeCustomTool(tool *RespTool, target string) bool {
 
 // Normalize merges additional_tools input items into r.Tools, unrolls
 // namespace tools to flattened function tools, and rewrites historical
-// function_call items plus a namespaced tool_choice to wire names. It
+// function_call items plus a namespaced tool_choice to wire names. Historical
+// custom calls become function calls with the same string input wrapper. It
 // returns the conversation items with additional_tools stripped. r.Tools
 // and r.ToolChoice are rewritten in place.
 func (t *ResponseTools) Normalize(r *ResponsesRequest, target string) ([]RespItem, *errclass.Error) {
@@ -194,14 +220,23 @@ func (t *ResponseTools) Normalize(r *ResponsesRequest, target string) ([]RespIte
 	}
 	r.Tools = flat
 	for i := range conv {
+		wasCustom := conv[i].Type == "custom_tool_call"
 		if (conv[i].Type == "function_call" || conv[i].Type == "custom_tool_call") && conv[i].Namespace != "" {
-			id := responseToolIdentity{name: conv[i].Name, namespace: conv[i].Namespace}
+			id := responseToolIdentity{name: conv[i].Name, namespace: conv[i].Namespace, isCustom: wasCustom}
 			qualified := qualifiedToolName(conv[i].Name, conv[i].Namespace)
 			if _, ok := t.names[qualified]; !ok {
 				t.names[qualified] = id
 			}
 			conv[i].Name = qualified
 			conv[i].Namespace = ""
+		}
+		if wasCustom {
+			if _, ok := t.names[conv[i].Name]; !ok {
+				t.names[conv[i].Name] = responseToolIdentity{name: conv[i].Name, isCustom: true}
+			}
+			conv[i].Type = "function_call"
+			conv[i].Arguments = WrapCustomToolInput(conv[i].Input)
+			conv[i].Input = ""
 		}
 	}
 	if len(r.ToolChoice) > 0 {

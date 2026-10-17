@@ -325,7 +325,7 @@ func TestNormalizeCustomToolBecomesFunction(t *testing.T) {
 		t.Fatalf("parameters.type = %+v", params)
 	}
 	props, ok := params["properties"].(map[string]any)
-	if !ok || len(props) != 0 {
+	if !ok || len(props) != 1 || props["input"].(map[string]any)["type"] != "string" {
 		t.Fatalf("parameters.properties = %+v", params)
 	}
 }

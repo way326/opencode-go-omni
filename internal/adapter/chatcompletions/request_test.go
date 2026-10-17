@@ -1062,7 +1062,7 @@ func TestFromResponses_CustomToolCallAndOutput(t *testing.T) {
 		t.Fatalf("tool call id = %v, want call_c1", c0["id"])
 	}
 	fn := c0["function"].(map[string]any)
-	if fn["name"] != "exec" || fn["arguments"] != "text('ok');" {
+	if fn["name"] != "exec" || fn["arguments"] != `{"input":"text('ok');"}` {
 		t.Fatalf("tool call function wrong: %v", fn)
 	}
 	tool := msgs[2].(map[string]any)

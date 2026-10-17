@@ -1,5 +1,33 @@
 # Release Notes
 
+## Unreleased
+
+### Code Mode custom tool argument fidelity
+
+- Translate freeform custom tools without an explicit parameters schema into
+  function tools with one required string `input` field. Explain the JSON
+  wrapper in the upstream tool description while preserving the original tool
+  instructions for its contents.
+- Encode historical custom calls with the same wrapper on translated Chat and
+  Messages routes. Preserve empty input, Unicode, line endings, JSON-looking
+  code, call IDs, tool receipts, and namespace identity across subsequent turns.
+- On non-GPT Responses routes, use the same argument wrapper for historical
+  calls, flatten historical namespace names together with declarations, and
+  restore the original name and namespace in returned calls. Convert wrapped
+  function argument events into custom input events without leaking the JSON
+  transport wrapper into executable code.
+- Keep the existing legacy response unwrapping, top-level `apply_patch` filter,
+  native GPT Responses passthrough and Gemini SDK route unchanged. Code Mode can
+  invoke the local patch tool inside `exec`; no live plugin is installed by a
+  source build.
+- Recognize the exact `beam-free` model as Chat Completions, following its
+  upstream provider metadata; retain unsupported handling for unknown model
+  families rather than assigning a guessed route.
+- Map translated reasoning controls for `claude-haiku-5-5` to adaptive thinking
+  and `output_config.effort`, as required by that model's Messages endpoint.
+  Keep explicit off controls, native Messages passthrough, and the budget
+  protocol used by other Messages models intact.
+
 ## 0.2.1 - 2026-10-16
 
 ### Codex Responses terminal delivery at EOF
