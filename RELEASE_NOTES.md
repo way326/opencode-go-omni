@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### Review fixes: stream completion, session affinity and shutdown
+
+- Validate EOF completion when converting Responses streams to Chat or
+  Messages. Keep native Responses EOF passthrough, and stop at the first
+  Responses completed/incomplete event so later bytes cannot become client
+  content after a terminal.
+- Reject truncated Messages-to-Responses streams that never supplied a valid
+  stop reason or explicit message_stop instead of synthesizing success. Preserve
+  valid stop-reason-plus-EOF compatibility and native Messages passthrough.
+- Derive fallback sessions for native Responses file inputs without letting
+  affinity reject content that the native request adapter accepts. Preserve
+  explicit session precedence and existing text/image session digests.
+- Preserve Chat image detail (`low`, `high`, `auto`) in Responses input images.
+- Quiesce new plugin work and drain active streams and host callbacks before
+  shutdown returns. The debug slow-drain threshold does not permit unsafe unloading;
+  a host callback that cannot be interrupted may delay shutdown until it exits.
+  Offline Windows checks do not establish real Unix unload acceptance.
+
 ### Code Mode custom tool argument fidelity
 
 - Translate freeform custom tools without an explicit parameters schema into

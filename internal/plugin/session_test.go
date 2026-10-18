@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
@@ -172,5 +173,32 @@ func TestDeriveOpenCodeSessionIDInvariants(t *testing.T) {
 	different, dErr := deriveOpenCodeSessionID("openai", []byte(`{"messages":[{"role":"user","content":"different"}]}`))
 	if dErr != nil || different == gotBase {
 		t.Fatalf("distinct initial content did not change session: %q/%q, error %v", gotBase, different, dErr)
+	}
+}
+
+func TestDeriveOpenCodeSessionIDResponsesFileIsStableAndPreservesNumbers(t *testing.T) {
+	bodyA := []byte(`{"input":[{"type":"message","role":"user","content":[{"type":"input_file","file_id":"file_123","metadata":{"revision":9007199254740993,"label":"notes"}}]}]}`)
+	bodyB := []byte(`{ "input" : [ { "content" : [ { "metadata" : { "label" : "notes", "revision" : 9007199254740993 }, "file_id" : "file_123", "type" : "input_file" } ], "role" : "user", "type" : "message" } ] }`)
+	bodyChangedNumber := []byte(strings.Replace(string(bodyB), "9007199254740993", "9007199254740992", 1))
+
+	a, aErr := deriveOpenCodeSessionID("openai-response", bodyA)
+	b, bErr := deriveOpenCodeSessionID("openai-response", bodyB)
+	changed, changedErr := deriveOpenCodeSessionID("openai-response", bodyChangedNumber)
+	if aErr != nil || bErr != nil || changedErr != nil {
+		t.Fatalf("derive errors = %v / %v / %v", aErr, bErr, changedErr)
+	}
+	if a != b {
+		t.Fatalf("equivalent file JSON produced different sessions: %q / %q", a, b)
+	}
+	if a == changed {
+		t.Fatalf("adjacent integers above 2^53 collided: %q", a)
+	}
+
+	plain, err := deriveOpenCodeSessionID("openai-response", []byte(`{"input":"hello"}`))
+	if err != nil || plain != "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824" {
+		t.Fatalf("ordinary text session = %q, %v", plain, err)
+	}
+	if _, err := deriveOpenCodeSessionID("openai-response", []byte(`{"input":`)); err == nil {
+		t.Fatal("malformed request JSON must still fail derivation")
 	}
 }

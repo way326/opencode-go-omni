@@ -32,8 +32,55 @@ type HostBridge struct {
 	// because Unix loaders free host_api and dlclose the plugin as soon as
 	// the shutdown export returns; any goroutine still calling into the
 	// host after that would crash the process.
-	inFlight sync.WaitGroup
+	inFlight flightGroup
+
+	streamMu      sync.Mutex
+	streamClosing bool
+	streams       map[*streamLifecycle]struct{}
 }
+
+// flightGroup publishes a closed channel for each generation that drains.
+// Unlike a timed WaitGroup waiter, observing an old generation cannot race a
+// fresh registration's first Add, and a timed wait needs no parked goroutine.
+// Shutdown still closes admission before treating a drained generation as its
+// final barrier.
+type flightGroup struct {
+	mu    sync.Mutex
+	count int
+	idle  chan struct{}
+}
+
+func (g *flightGroup) Add(delta int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if delta == 0 {
+		return
+	}
+	if g.count+delta < 0 {
+		panic("negative host in-flight count")
+	}
+	if g.count == 0 {
+		g.idle = make(chan struct{})
+	}
+	g.count += delta
+	if g.count == 0 {
+		close(g.idle)
+	}
+}
+
+func (g *flightGroup) Done() { g.Add(-1) }
+
+func (g *flightGroup) idleChannel() <-chan struct{} {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.idle == nil {
+		g.idle = make(chan struct{})
+		close(g.idle)
+	}
+	return g.idle
+}
+
+func (g *flightGroup) Wait() { <-g.idleChannel() }
 
 // NewHostBridge wraps the injected raw host caller so the bridge satisfies
 // catalog.HostClient. main.go wires it to the C host API after init;
@@ -240,21 +287,101 @@ func (b *HostBridge) callWithTimeoutResult(ctx context.Context, method string, p
 // WaitForInFlight blocks until every in-flight host-callback invocation has
 // fully completed — including callbacks orphaned past their deadline and
 // their abandon/drain cleanup — or timeout elapses, returning false on
-// timeout (sync.WaitGroup has no timed wait). handleShutdown calls this so
+// timeout. No waiter goroutine survives a timeout. handleShutdown calls this so
 // the export does not return while our goroutines may still call into host
 // memory that a Unix loader frees immediately afterwards.
 func (b *HostBridge) WaitForInFlight(timeout time.Duration) bool {
-	drained := make(chan struct{})
-	go func() {
-		b.inFlight.Wait()
-		close(drained)
-	}()
+	drained := b.inFlight.idleChannel()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	select {
 	case <-drained:
 		return true
-	case <-time.After(timeout):
+	case <-timer.C:
 		return false
 	}
+}
+
+// WaitForInFlightForever is the final shutdown barrier. The caller must first
+// close admission and wait for synchronous RPCs/refresh work to exit, so no
+// new top-level inFlight count can begin after the counter reaches zero.
+func (b *HostBridge) WaitForInFlightForever() {
+	b.inFlight.Wait()
+}
+
+// BeginShutdown closes stream/request admission and asks every registered
+// lifecycle to clean up concurrently. Each registered lifecycle already has
+// a live watchdog/owner count, so scheduling a finish cannot create a zero
+// count window.
+func (b *HostBridge) BeginShutdown() {
+	b.streamMu.Lock()
+	b.streamClosing = true
+	streams := make([]*streamLifecycle, 0, len(b.streams))
+	for stream := range b.streams {
+		streams = append(streams, stream)
+		b.inFlight.Add(1)
+	}
+	b.streamMu.Unlock()
+	for _, stream := range streams {
+		go func(stream *streamLifecycle) {
+			defer b.inFlight.Done()
+			stream.finish("plugin shutdown", "shutdown")
+		}(stream)
+	}
+}
+
+// ReopenAfterShutdown is used only after the previous bridge work fully
+// drained, when a Windows host reuses an already-loaded DLL for registration.
+func (b *HostBridge) ReopenAfterShutdown() {
+	b.streamMu.Lock()
+	b.streamClosing = false
+	b.streams = nil
+	b.streamMu.Unlock()
+}
+
+func (b *HostBridge) registerStreamLifecycle(stream *streamLifecycle) {
+	b.streamMu.Lock()
+	if b.streams == nil {
+		b.streams = make(map[*streamLifecycle]struct{})
+	}
+	b.streams[stream] = struct{}{}
+	closing := b.streamClosing
+	if closing {
+		b.inFlight.Add(1)
+	}
+	b.streamMu.Unlock()
+	if closing {
+		go func() {
+			defer b.inFlight.Done()
+			stream.finish("plugin shutdown", "shutdown")
+		}()
+	}
+}
+
+func (b *HostBridge) unregisterStreamLifecycle(stream *streamLifecycle) {
+	b.streamMu.Lock()
+	delete(b.streams, stream)
+	b.streamMu.Unlock()
+}
+
+// reserveOperation atomically admits host I/O before shutdown closes the
+// bridge and pins inFlight across the gap before callWithTimeoutResult adds
+// its callback count. Cleanup operations use their lifecycle owner count and
+// do not use this admission path.
+func (b *HostBridge) reserveOperation() bool {
+	b.streamMu.Lock()
+	defer b.streamMu.Unlock()
+	if b.streamClosing {
+		return false
+	}
+	b.inFlight.Add(1)
+	return true
+}
+
+func (b *HostBridge) isClosing() bool {
+	b.streamMu.Lock()
+	defer b.streamMu.Unlock()
+	return b.streamClosing
 }
 
 // invoke marshals payload and performs the host callback under ctx through
@@ -295,6 +422,10 @@ func (b *HostBridge) Do(ctx context.Context, req pluginapi.HTTPRequest) (plugina
 // Native RPC host HTTP callbacks use the global CPA proxy setting; selected
 // auth proxy overrides are not exposed by that host API in v8.0.28.
 func (b *HostBridge) DoWithCallback(ctx context.Context, req pluginapi.HTTPRequest, callbackID string) (pluginapi.HTTPResponse, error) {
+	if !b.reserveOperation() {
+		return pluginapi.HTTPResponse{}, fmt.Errorf("host http do failed: plugin is shutting down")
+	}
+	defer b.inFlight.Done()
 	env, err := b.invoke(ctx, pluginabi.MethodHostHTTPDo, hostHTTPReq{
 		HostCallbackID: callbackID,
 		Method:         req.Method, URL: req.URL, Headers: req.Headers, Body: req.Body,
@@ -323,6 +454,10 @@ func (b *HostBridge) DoStream(ctx context.Context, req pluginapi.HTTPRequest) (s
 }
 
 func (b *HostBridge) DoStreamWithCallback(ctx context.Context, req pluginapi.HTTPRequest, callbackID string) (statusCode int, headers http.Header, upstreamStreamID string, err error) {
+	if !b.reserveOperation() {
+		return 0, nil, "", fmt.Errorf("host http do_stream failed: plugin is shutting down")
+	}
+	defer b.inFlight.Done()
 	payloadBytes, _ := json.Marshal(hostHTTPReq{
 		HostCallbackID: callbackID,
 		Method:         req.Method, URL: req.URL, Headers: req.Headers, Body: req.Body,
@@ -352,6 +487,12 @@ func (b *HostBridge) DoStreamWithCallback(ctx context.Context, req pluginapi.HTT
 	if len(env.Result) > 0 && json.Unmarshal(env.Result, &out) != nil {
 		return 0, nil, "", fmt.Errorf("host http do_stream failed: undecodable response body")
 	}
+	if b.isClosing() {
+		if out.StreamID != "" {
+			_ = b.StreamClose(out.StreamID)
+		}
+		return 0, nil, "", fmt.Errorf("host http do_stream failed: plugin is shutting down")
+	}
 	return out.StatusCode, out.Headers, out.StreamID, nil
 }
 
@@ -380,6 +521,10 @@ func (b *HostBridge) closeLateStream(raw []byte) {
 // callback still joins inFlight accounting so shutdown drains a read
 // parked inside the host instead of dlclose-ing over its live FFI frame.
 func (b *HostBridge) StreamRead(upstreamStreamID string) (payload []byte, errMsg string, done bool, err error) {
+	if !b.reserveOperation() {
+		return nil, "", false, fmt.Errorf("host http stream_read failed: plugin is shutting down")
+	}
+	defer b.inFlight.Done()
 	env, err := b.invoke(context.Background(), pluginabi.MethodHostHTTPStreamRead,
 		hostStreamIDReq{StreamID: upstreamStreamID}, "host http stream_read")
 	if err != nil {
@@ -406,6 +551,10 @@ func (b *HostBridge) StreamClose(upstreamStreamID string) error {
 // host downstream backpressure must surface as an error, not a wedged
 // producer goroutine.
 func (b *HostBridge) StreamEmit(downstreamStreamID string, payload []byte) error {
+	if !b.reserveOperation() {
+		return fmt.Errorf("host stream emit failed: plugin is shutting down")
+	}
+	defer b.inFlight.Done()
 	req := struct {
 		StreamID string `json:"stream_id"`
 		Payload  []byte `json:"payload"`

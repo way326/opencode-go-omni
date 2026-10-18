@@ -1235,10 +1235,11 @@ func JoinTexts(parts []map[string]any) string {
 
 // ContentPart is one OpenAI-style content part decoded by
 // DecodeStringOrParts: a text part (ImageURL empty) or an image part
-// carrying its resolved URL.
+// carrying its resolved URL and optional detail hint.
 type ContentPart struct {
 	Text     string
 	ImageURL string // resolved image URL; empty for text parts
+	Detail   string // optional image detail hint, such as low, high, or auto
 }
 
 // DecodeStringOrParts is THE shared string-or-parts kernel owning the
@@ -1265,6 +1266,7 @@ func DecodeStringOrParts(raw json.RawMessage, targetLabel string) ([]ContentPart
 		Type     string          `json:"type"`
 		Text     string          `json:"text"`
 		ImageURL json.RawMessage `json:"image_url"`
+		Detail   json.RawMessage `json:"detail"`
 	}
 	if err := json.Unmarshal(raw, &parts); err != nil {
 		return nil, errclass.Translation("malformed message content: " + err.Error())
@@ -1279,7 +1281,8 @@ func DecodeStringOrParts(raw json.RawMessage, targetLabel string) ([]ContentPart
 			if eErr != nil {
 				return nil, eErr
 			}
-			out = append(out, ContentPart{ImageURL: url})
+			detail := openAIImageDetail(p.Detail, p.ImageURL)
+			out = append(out, ContentPart{ImageURL: url, Detail: detail})
 			continue
 		}
 		if p.Text != "" { // uniform DROP policy: no dead text parts upstream
@@ -1287,6 +1290,23 @@ func DecodeStringOrParts(raw json.RawMessage, targetLabel string) ([]ContentPart
 		}
 	}
 	return out, nil
+}
+
+// openAIImageDetail retains a string detail hint from either the part or
+// the image_url object. Non-string values are ignored so adding detail
+// support does not make previously accepted image payloads fail decoding.
+func openAIImageDetail(partDetail, imageURL json.RawMessage) string {
+	var detail string
+	if json.Unmarshal(partDetail, &detail) == nil && detail != "" {
+		return detail
+	}
+	var image struct {
+		Detail json.RawMessage `json:"detail"`
+	}
+	if json.Unmarshal(imageURL, &image) == nil {
+		_ = json.Unmarshal(image.Detail, &detail)
+	}
+	return detail
 }
 
 // ClaudeBlocksFromOpenAI normalizes an OpenAI-style content field (JSON

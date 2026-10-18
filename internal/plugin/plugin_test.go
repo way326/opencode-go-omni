@@ -785,7 +785,6 @@ func TestRegisterRefreshesWithConfiguredBearer(t *testing.T) {
 // registration must still succeed with an empty routable set (FR-002).
 func TestRegisterWithBlockingCatalogReturnsQuickly(t *testing.T) {
 	release := make(chan struct{})
-	t.Cleanup(func() { close(release) })
 	f := &fakeCaller{responder: func(method string, payload []byte) ([]byte, error) {
 		var wire map[string]any
 		if method == pluginabi.MethodHostHTTPDo && json.Unmarshal(payload, &wire) == nil {
@@ -798,6 +797,8 @@ func TestRegisterWithBlockingCatalogReturnsQuickly(t *testing.T) {
 	}}
 	m := NewManager(NewHostBridge(f.call))
 	t.Cleanup(func() { _, _ = m.HandleCall("plugin.shutdown", nil) })
+	// Cleanup is LIFO: release the fake callback before the full shutdown drain.
+	t.Cleanup(func() { close(release) })
 
 	start := time.Now()
 	resp, err := m.HandleCall("plugin.register", lifecycleRequestBody(testValidYAML))
@@ -859,15 +860,17 @@ func TestShutdownClearsStateAndStopsTicker(t *testing.T) {
 }
 
 // TestShutdownDrainsOrphanedHostCallbacks pins the Unix unload-safety fix:
-// handleShutdown waits (bounded) for host-callback goroutines orphaned by
-// timeouts, warns when any are still alive at the deadline, and a follow-up
-// shutdown once the orphan unwinds reports nothing in flight.
+// shutdown stays blocked after the diagnostic threshold while an orphaned
+// host callback remains inside the host, then returns only after it unwinds.
 func TestShutdownDrainsOrphanedHostCallbacks(t *testing.T) {
 	oldDrain := shutdownDrainTimeout
 	shutdownDrainTimeout = 60 * time.Millisecond
 	defer func() { shutdownDrainTimeout = oldDrain }()
 
 	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseHost := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseHost)
 	f := &fakeCaller{responder: func(method string, _ []byte) ([]byte, error) {
 		switch method {
 		case pluginabi.MethodHostLog:
@@ -887,31 +890,43 @@ func TestShutdownDrainsOrphanedHostCallbacks(t *testing.T) {
 	}
 	cancel()
 
-	inFlightWarn := func() int {
-		n := 0
-		for _, c := range f.callsOf(pluginabi.MethodHostLog) {
-			if strings.Contains(string(c.payload), "still in flight") {
-				n++
-			}
+	type shutdownResult struct {
+		response []byte
+		err      error
+	}
+	shutdownDone := make(chan shutdownResult, 1)
+	go func() {
+		resp, err := m.HandleCall(pluginabi.MethodPluginShutdown, nil)
+		shutdownDone <- shutdownResult{response: resp, err: err}
+	}()
+	// The diagnostic threshold expires, but it cannot release the shutdown.
+	time.Sleep(100 * time.Millisecond)
+	select {
+	case result := <-shutdownDone:
+		t.Fatalf("shutdown returned before releasing the orphaned callback: %s, err=%v", result.response, result.err)
+	default:
+	}
+	releaseRPC, admitted := m.enterRPC()
+	if admitted {
+		releaseRPC()
+		t.Fatal("RPC gate admitted a new call while shutdown was draining")
+	}
+
+	releaseHost()
+	select {
+	case result := <-shutdownDone:
+		if result.err != nil || !decodeEnv(t, result.response).OK {
+			t.Fatalf("shutdown result = %s, err=%v", result.response, result.err)
 		}
-		return n
+	case <-time.After(2 * time.Second):
+		t.Fatal("shutdown did not return after the host callback drained")
 	}
-
-	resp := mustHandle(t, m, "plugin.shutdown", nil)
-	if env := decodeEnv(t, resp); !env.OK || string(env.Result) != "{}" {
-		t.Fatalf("shutdown envelope = %s", resp)
+	if !m.bridge.WaitForInFlight(time.Second) {
+		t.Fatal("host callbacks still in flight after shutdown returned")
 	}
-	if n := inFlightWarn(); n != 1 {
-		t.Fatalf("in-flight warns = %d, want exactly the stalled-shutdown warn", n)
-	}
-
-	close(release)
-	resp2 := mustHandle(t, m, "plugin.shutdown", nil)
+	resp2 := mustHandle(t, m, pluginabi.MethodPluginShutdown, nil)
 	if env := decodeEnv(t, resp2); !env.OK {
 		t.Fatalf("second shutdown envelope = %s", resp2)
-	}
-	if n := inFlightWarn(); n != 1 {
-		t.Fatalf("warns after orphan released = %d, want no repeat", n)
 	}
 }
 
@@ -1070,9 +1085,9 @@ func TestReconfigureFailedRefreshServesViaTicks(t *testing.T) {
 // immediately and shutdown cannot sit holding lifeMu for up to
 // request-timeout behind a hung upstream.
 func TestShutdownAbortsInFlightTickRefresh(t *testing.T) {
-	// The orphaned tick callback stays parked until cleanup releases it;
-	// shrink the unload-safety drain so it cannot dominate this timing
-	// assertion (the ctx-abort property under test is orthogonal).
+	// The orphaned tick callback stays parked until cleanup releases it; the
+	// tick's loop itself must exit promptly on the stop-derived context, while
+	// shutdown remains blocked until the host callback actually unwinds.
 	oldDrain := shutdownDrainTimeout
 	shutdownDrainTimeout = 50 * time.Millisecond
 	defer func() { shutdownDrainTimeout = oldDrain }()
@@ -1080,7 +1095,9 @@ func TestShutdownAbortsInFlightTickRefresh(t *testing.T) {
 	var syncServed atomic.Bool
 	started := make(chan struct{})
 	release := make(chan struct{})
-	t.Cleanup(func() { close(release) })
+	var releaseOnce sync.Once
+	releaseHost := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseHost)
 	f := &fakeCaller{responder: func(method string, payload []byte) ([]byte, error) {
 		if method != pluginabi.MethodHostHTTPDo {
 			return hostOK(map[string]any{}), nil
@@ -1113,13 +1130,38 @@ func TestShutdownAbortsInFlightTickRefresh(t *testing.T) {
 		t.Fatal("tick refresh never started")
 	}
 
-	shutdownStart := time.Now()
-	resp := mustHandle(t, m, "plugin.shutdown", nil)
-	if env := decodeEnv(t, resp); !env.OK {
-		t.Fatalf("shutdown envelope = %s", resp)
+	m.mu.RLock()
+	oldDone := m.done
+	m.mu.RUnlock()
+	type shutdownResult struct {
+		response []byte
+		err      error
 	}
-	if elapsed := time.Since(shutdownStart); elapsed > 2*time.Second {
-		t.Fatalf("shutdown waited %v on the in-flight tick; stop-derived ctx must abort it", elapsed)
+	shutdownDone := make(chan shutdownResult, 1)
+	go func() {
+		resp, err := m.HandleCall(pluginabi.MethodPluginShutdown, nil)
+		shutdownDone <- shutdownResult{response: resp, err: err}
+	}()
+	select {
+	case <-oldDone:
+		// The loop exited before the host callback's gate was released, proving
+		// stop cancellation is still effective under the new full drain.
+	case <-time.After(2 * time.Second):
+		t.Fatal("shutdown did not cancel and join the in-flight tick promptly")
+	}
+	select {
+	case result := <-shutdownDone:
+		t.Fatalf("shutdown returned while the tick host callback remained parked: %s, err=%v", result.response, result.err)
+	default:
+	}
+	releaseHost()
+	select {
+	case result := <-shutdownDone:
+		if result.err != nil || !decodeEnv(t, result.response).OK {
+			t.Fatalf("shutdown result = %s, err=%v", result.response, result.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("shutdown did not return after the tick callback drained")
 	}
 }
 

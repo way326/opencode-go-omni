@@ -36,6 +36,7 @@ func newStreamLifecycle(bridge *HostBridge, downID, upstreamID string, timeout t
 		}()
 		s.finish("stream exceeded request-timeout", "timeout")
 	})
+	bridge.registerStreamLifecycle(s)
 	s.mu.Unlock()
 	return s
 }
@@ -105,6 +106,7 @@ func (s *streamLifecycle) finish(errMsg, reason string) {
 		// that do not have a separate pump goroutine holding a count.
 		defer s.bridge.inFlight.Done()
 	}
+	defer s.bridge.unregisterStreamLifecycle(s)
 	debugTrace("executor stream finish down_id=%q upstream_id=%q reason=%s failed=%t elapsed_ms=%d", s.downID, s.upstreamID, reason, errMsg != "", time.Since(s.started).Milliseconds())
 	s.cleanup(errMsg)
 }
@@ -126,6 +128,7 @@ func (s *streamLifecycle) commitTerminal(payload []byte) {
 	if timerStopped {
 		defer s.bridge.inFlight.Done()
 	}
+	defer s.bridge.unregisterStreamLifecycle(s)
 	var emitErr error
 	if s.downID != "" {
 		emitErr = s.bridge.StreamEmit(s.downID, payload)

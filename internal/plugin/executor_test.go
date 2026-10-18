@@ -1758,12 +1758,13 @@ func TestExecuteStreamBlockedEmitCannotWedgeTheProducer(t *testing.T) {
 	release := make(chan struct{})
 	var once sync.Once
 	drain := func() { once.Do(func() { close(release) }) }
-	t.Cleanup(drain)
 
 	var reads atomic.Int32
 	f := &fakeCaller{}
 	m := NewManager(NewHostBridge(f.call))
 	t.Cleanup(func() { _, _ = m.HandleCall("plugin.shutdown", nil) })
+	// Cleanup is LIFO: the intentionally parked emit must unwind before shutdown.
+	t.Cleanup(drain)
 	f.responder = wrapWithCatalog(multiRouteCatalog, func(method string, _ []byte) ([]byte, error) {
 		switch method {
 		case pluginabi.MethodHostHTTPDoStream:

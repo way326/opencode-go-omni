@@ -435,8 +435,8 @@ func TestCustomToolMessagesStreamRoundTrip(t *testing.T) {
 }
 
 // TestCustomToolMessagesFlushTerminalRestoresInput pins the deferred
-// terminal: an upstream close without message_stop still reports the
-// custom tool input to the client.
+// terminal: a valid tool_use stop reason followed by EOF without message_stop
+// still reports the custom tool input to the client.
 func TestCustomToolMessagesFlushTerminalRestoresInput(t *testing.T) {
 	const code = "text('flush');"
 	rt := shared.NewResponseTools()
@@ -461,11 +461,19 @@ func TestCustomToolMessagesFlushTerminalRestoresInput(t *testing.T) {
 			"type": "content_block_delta", "index": 0,
 			"delta": map[string]any{"type": "input_json_delta", "partial_json": shared.WrapCustomToolInput(code)},
 		}),
+		msgFrame("message_delta", map[string]any{
+			"type": "message_delta", "delta": map[string]any{"stop_reason": "tool_use"},
+			"usage": map[string]any{"output_tokens": 1},
+		}),
 	)
 	if eErr != nil || done {
 		t.Fatalf("done=%v err=%v", done, eErr)
 	}
-	events = append(events, sc.Flush()...)
+	flushed, finishErr := sc.Finish()
+	if finishErr != nil {
+		t.Fatalf("valid tool-use EOF: %v", finishErr)
+	}
+	events = append(events, flushed...)
 	byName := namedEvents(t, events)
 	inputDone := byName["response.custom_tool_call_input.done"]
 	if len(inputDone) != 1 || inputDone[0]["input"] != code {

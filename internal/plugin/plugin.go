@@ -47,6 +47,17 @@ type Manager struct {
 	// their stop-wait-install steps cannot interleave into orphaned tickers.
 	lifeMu sync.Mutex
 
+	// rpcMu gates methods that can use the host while shutdown drains. Lifecycle
+	// methods are serialized separately by lifeMu; ordinary HandleCall paths do
+	// not acquire lifeMu, so shutdown never waits on a call that is waiting for
+	// the lifecycle lock it holds.
+	rpcMu               sync.Mutex
+	rpcIdle             chan struct{}
+	rpcActive           int
+	rpcClosing          bool
+	rpcShutdownComplete bool
+	rpcEpoch            uint64 // invalidates lifecycle calls queued before shutdown
+
 	mu  sync.RWMutex
 	cfg config.Config
 	mgr *catalog.Manager
@@ -74,6 +85,15 @@ func (m *Manager) HandleCall(method string, request []byte) (resp []byte, err er
 			err = nil
 		}
 	}()
+	if method != pluginabi.MethodPluginRegister &&
+		method != pluginabi.MethodPluginReconfigure &&
+		method != pluginabi.MethodPluginShutdown {
+		release, ok := m.enterRPC()
+		if !ok {
+			return ErrEnvelope("plugin_shutting_down", "plugin is draining active work"), nil
+		}
+		defer release()
+	}
 	switch method {
 	case pluginabi.MethodPluginRegister, pluginabi.MethodPluginReconfigure:
 		return m.handleLifecycle(request)
@@ -311,6 +331,17 @@ func (m *Manager) handleManagement(request []byte) ([]byte, error) {
 // config, refresh the catalog once, publish state, restart the refresh
 // loop. Registration succeeds even when the initial refresh fails (FR-002).
 func (m *Manager) handleLifecycle(request []byte) ([]byte, error) {
+	epoch, admitted := m.lifecycleAdmission()
+	if !admitted {
+		return ErrEnvelope("plugin_shutting_down", "plugin is draining active work"), nil
+	}
+	return m.handleLifecycleAdmitted(request, epoch)
+}
+
+// handleLifecycleAdmitted rechecks the admission generation after lifeMu is
+// acquired: a register queued before shutdown must not reopen the bridge once
+// that shutdown finishes. Only a fresh post-shutdown request may reopen it.
+func (m *Manager) handleLifecycleAdmitted(request []byte, epoch uint64) ([]byte, error) {
 	var req lifecycleRequest
 	if err := json.Unmarshal(request, &req); err != nil {
 		return ErrEnvelope("invalid_request", "malformed lifecycle request body"), nil
@@ -322,6 +353,9 @@ func (m *Manager) handleLifecycle(request []byte) ([]byte, error) {
 	}
 	m.lifeMu.Lock()
 	defer m.lifeMu.Unlock()
+	if !m.reopenAfterShutdown(epoch) {
+		return ErrEnvelope("plugin_shutting_down", "lifecycle request preceded plugin shutdown"), nil
+	}
 	debugTrace("lifecycle config_loaded key_count=%d prefix_enabled=%t prefix=%s", len(cfg.APIKeys), cfg.ModelPrefix.Enabled, cfg.ModelPrefix.Value)
 	ctx, cancel := context.WithTimeout(context.Background(), registerRefreshTimeout)
 	defer cancel()
@@ -453,9 +487,10 @@ func (m *Manager) handleModels() ([]byte, error) {
 	return okEnvelope(pluginapi.ModelResponse{Provider: ProviderID, Models: models}), nil
 }
 
-// shutdownDrainTimeout bounds how long handleShutdown waits for orphaned
-// host-callback goroutines (timed-out callbacks and their abandon/drain
-// cleanup) to finish before returning. Package var so tests can shrink it.
+// shutdownDrainTimeout bounds how long handleShutdown waits before writing a
+// diagnostic that draining is slow. It never permits shutdown to return while
+// a host callback or stream cleanup is still in flight. Package var so tests
+// can shrink it.
 var shutdownDrainTimeout = 15 * time.Second
 
 // handleShutdown stops the refresh loop, drains orphaned host callbacks,
@@ -466,19 +501,153 @@ var shutdownDrainTimeout = 15 * time.Second
 func (m *Manager) handleShutdown() ([]byte, error) {
 	m.lifeMu.Lock()
 	defer m.lifeMu.Unlock()
+	m.closeRPCGate()
 	oldDone := m.closeStop()
 	if oldDone != nil {
 		<-oldDone
 	}
-	if m.bridge != nil && !m.bridge.WaitForInFlight(shutdownDrainTimeout) {
-		// Non-Windows unload during this residual window can crash the
-		// host; the warn makes the stall visible without blocking forever.
-		_ = m.bridge.Log("warn", "shutdown proceeding with host callbacks still in flight", nil)
+	if m.bridge != nil {
+		m.bridge.BeginShutdown()
+	}
+
+	deadline := time.Now().Add(shutdownDrainTimeout)
+	warned := false
+	warnStillDraining := func() {
+		if warned {
+			return
+		}
+		warned = true
+		message := "shutdown drain exceeded its diagnostic timeout; work is still in flight"
+		debugTrace("%s", message)
+	}
+
+	if !m.waitRPCs(time.Until(deadline)) {
+		warnStillDraining()
+		m.waitRPCsForever()
+	}
+	if m.bridge != nil {
+		remaining := time.Until(deadline)
+		if remaining <= 0 || !m.bridge.WaitForInFlight(remaining) {
+			warnStillDraining()
+			m.bridge.WaitForInFlightForever()
+		}
 	}
 	m.mu.Lock()
 	m.cfg, m.mgr = config.Config{}, nil
 	m.mu.Unlock()
+	m.markShutdownComplete()
 	return okEnvelope(struct{}{}), nil
+}
+
+// enterRPC admits one ordinary RPC and returns its release function. The
+// generation channel tracks the transition to zero without adding to a
+// WaitGroup, so shutdown can safely close admission before waiting.
+func (m *Manager) enterRPC() (func(), bool) {
+	m.rpcMu.Lock()
+	m.initRPCIdleLocked()
+	if m.rpcClosing {
+		m.rpcMu.Unlock()
+		return nil, false
+	}
+	if m.rpcActive == 0 {
+		m.rpcIdle = make(chan struct{})
+	}
+	m.rpcActive++
+	m.rpcMu.Unlock()
+	return m.leaveRPC, true
+}
+
+func (m *Manager) leaveRPC() {
+	m.rpcMu.Lock()
+	defer m.rpcMu.Unlock()
+	if m.rpcActive == 0 {
+		panic("plugin RPC gate underflow")
+	}
+	m.rpcActive--
+	if m.rpcActive == 0 {
+		close(m.rpcIdle)
+	}
+}
+
+func (m *Manager) initRPCIdleLocked() {
+	if m.rpcIdle != nil {
+		return
+	}
+	m.rpcIdle = make(chan struct{})
+	close(m.rpcIdle)
+}
+
+func (m *Manager) closeRPCGate() {
+	m.rpcMu.Lock()
+	m.initRPCIdleLocked()
+	m.rpcEpoch++
+	m.rpcClosing = true
+	m.rpcMu.Unlock()
+}
+
+func (m *Manager) waitRPCs(timeout time.Duration) bool {
+	m.rpcMu.Lock()
+	m.initRPCIdleLocked()
+	idle := m.rpcIdle
+	m.rpcMu.Unlock()
+	if timeout <= 0 {
+		select {
+		case <-idle:
+			return true
+		default:
+			return false
+		}
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-idle:
+		return true
+	case <-timer.C:
+		return false
+	}
+}
+
+func (m *Manager) waitRPCsForever() {
+	m.rpcMu.Lock()
+	m.initRPCIdleLocked()
+	idle := m.rpcIdle
+	m.rpcMu.Unlock()
+	<-idle
+}
+
+// lifecycleAdmission captures an epoch before a lifecycle request can wait on
+// lifeMu. Calls entering during a drain cannot queue a later reopening.
+func (m *Manager) lifecycleAdmission() (uint64, bool) {
+	m.rpcMu.Lock()
+	defer m.rpcMu.Unlock()
+	return m.rpcEpoch, !m.rpcClosing || m.rpcShutdownComplete
+}
+
+// reopenAfterShutdown permits only a current-generation lifecycle request to
+// reopen a fully drained bridge. The caller holds lifeMu.
+func (m *Manager) reopenAfterShutdown(epoch uint64) bool {
+	m.rpcMu.Lock()
+	defer m.rpcMu.Unlock()
+	if epoch != m.rpcEpoch || (m.rpcClosing && !m.rpcShutdownComplete) {
+		return false
+	}
+	if !m.rpcShutdownComplete {
+		return true
+	}
+	if m.bridge != nil {
+		m.bridge.ReopenAfterShutdown()
+	}
+	m.rpcShutdownComplete = false
+	m.rpcClosing = false
+	return true
+}
+
+func (m *Manager) markShutdownComplete() {
+	m.rpcMu.Lock()
+	m.rpcShutdownComplete = true
+	m.rpcClosing = true
+	m.rpcMu.Unlock()
 }
 
 // startRefreshLoop spawns the single background ticker goroutine over the

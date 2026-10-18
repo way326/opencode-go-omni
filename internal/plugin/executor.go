@@ -7,11 +7,13 @@
 package plugin
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -304,6 +306,31 @@ func deriveOpenCodeSessionID(sourceFormat string, originalRequest []byte) (strin
 		}
 		return nil
 	}
+	appendNativeResponsesContent := func(raw json.RawMessage, target string) *errclass.Error {
+		parts, eErr := shared.DecodeStringOrParts(raw, target)
+		if eErr == nil {
+			for _, part := range parts {
+				if part.ImageURL != "" {
+					content.WriteString(part.ImageURL)
+				} else {
+					content.WriteString(part.Text)
+				}
+			}
+			return nil
+		}
+		// Native Responses passthrough accepts input parts beyond the text and
+		// image subset used by cross-format translation (for example input_file).
+		// Session affinity must hash those valid JSON values without becoming an
+		// extra adapter validator. Keep ordinary text/image digests unchanged;
+		// use a canonical JSON form only when the shared text/image decoder cannot
+		// represent the native content. The adapter still owns request validation.
+		canonical, ok := stableAffinityJSON(raw)
+		if !ok {
+			return eErr
+		}
+		content.Write(canonical)
+		return nil
+	}
 
 	switch sourceFormat {
 	case "openai":
@@ -381,7 +408,7 @@ func deriveOpenCodeSessionID(sourceFormat string, originalRequest []byte) (strin
 			} else if !isUserMessage {
 				break
 			}
-			if eErr := appendParts(item.Content, "/v1/responses"); eErr != nil {
+			if eErr := appendNativeResponsesContent(item.Content, "/v1/responses"); eErr != nil {
 				return "", eErr
 			}
 		}
@@ -425,6 +452,27 @@ func deriveOpenCodeSessionID(sourceFormat string, originalRequest []byte) (strin
 
 	digest := sha256.Sum256([]byte(content.String()))
 	return hex.EncodeToString(digest[:]), nil
+}
+
+// stableAffinityJSON produces deterministic JSON without converting numbers
+// through float64. json.Number preserves the original numeric token, while
+// encoding/json sorts map keys during marshaling.
+func stableAffinityJSON(raw json.RawMessage) ([]byte, bool) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, false
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return nil, false
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return nil, false
+	}
+	return encoded, true
 }
 
 // convertNonStream routes one upstream response to its adapter's uniform

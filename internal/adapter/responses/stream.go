@@ -50,6 +50,18 @@ type StreamConverter struct {
 	// conversion targets; an instance converts to exactly one target,
 	// so nextIndex doubles as the tool block index allocator.
 	tracker *toolCallTracker
+
+	// terminalSeen latches the first completed/incomplete response. The
+	// Responses stream contract ends at that event; any frames already
+	// buffered after it (or delivered in a later Feed call) are discarded.
+	terminalSeen bool
+	// emitted records whether a successful Feed returned any client frames.
+	// A truncated stream after visible output cannot safely be retried.
+	emitted bool
+	// Finish validates EOF for converted targets and is idempotent. Native
+	// Responses passthrough deliberately keeps its historical EOF behavior.
+	finishCalled bool
+	finishErr    *errclass.Error
 }
 
 // NewStreamConverter builds a converter for sourceFormat ("openai",
@@ -265,10 +277,28 @@ func (sc *StreamConverter) checkTarget() *errclass.Error {
 // are forwarded verbatim without JSON validation; conversion targets
 // parse eagerly into typed per-event structs.
 func (sc *StreamConverter) Feed(chunk []byte) (events [][]byte, done bool, eErr *errclass.Error) {
+	return sc.feed(chunk, true)
+}
+
+// feed drains complete frames. recordEmission is false only when Finish
+// closes a complete final SSE block with a synthetic blank line: those
+// frames are returned only if the terminal itself is valid, and an EOF
+// truncation error must retain retryability based on bytes delivered by
+// earlier Feed calls.
+func (sc *StreamConverter) feed(chunk []byte, recordEmission bool) (events [][]byte, done bool, eErr *errclass.Error) {
+	if sc.finishCalled {
+		return nil, sc.terminalSeen, sc.finishErr
+	}
+	if sc.terminalSeen {
+		return nil, true, nil
+	}
 	sc.framer.Push(chunk)
 	for {
 		eventType, payload, raw, ok := sc.framer.Next()
 		if !ok {
+			if recordEmission && len(events) > 0 {
+				sc.emitted = true
+			}
 			return events, done, nil
 		}
 		if sc.source == "openai-response" {
@@ -277,7 +307,13 @@ func (sc *StreamConverter) Feed(chunk []byte) (events [][]byte, done bool, eErr 
 			if dErr != nil {
 				return events, false, dErr
 			}
-			done = done || d
+			if d {
+				sc.terminalSeen = true
+				if recordEmission && len(events) > 0 {
+					sc.emitted = true
+				}
+				return events, true, nil
+			}
 			continue
 		}
 		evs, d, dErr := sc.convertEvent(eventType, payload)
@@ -285,8 +321,51 @@ func (sc *StreamConverter) Feed(chunk []byte) (events [][]byte, done bool, eErr 
 		if dErr != nil {
 			return events, false, dErr
 		}
-		done = done || d
+		if d {
+			sc.terminalSeen = true
+			if recordEmission && len(events) > 0 {
+				sc.emitted = true
+			}
+			return events, true, nil
+		}
 	}
+}
+
+// Finish flushes a complete final SSE block and validates EOF for converted
+// Chat Completions and Messages clients. A missing terminal is a truncated
+// upstream response. Native Responses passthrough remains byte-preserving:
+// it does not require or synthesize a terminal at EOF. Finish is idempotent.
+func (sc *StreamConverter) Finish() ([][]byte, *errclass.Error) {
+	if sc.finishCalled {
+		return nil, sc.finishErr
+	}
+	if sc.source == "openai-response" || sc.terminalSeen {
+		sc.finishCalled = true
+		return nil, nil
+	}
+
+	// Compatibility: converted routes accept a syntactically complete final
+	// event block without its terminating blank line. Partial JSON still fails
+	// through the ordinary event decoder below.
+	events, done, eErr := sc.feed([]byte("\n\n"), false)
+	sc.finishCalled = true
+	if eErr != nil {
+		sc.finishErr = eErr
+		return nil, eErr
+	}
+	if done {
+		if len(events) > 0 {
+			sc.emitted = true
+		}
+		return events, nil
+	}
+	sc.finishErr = &errclass.Error{
+		Class:      errclass.ClassUpstream,
+		Message:    "responses stream ended before response.completed or response.incomplete (truncated upstream stream)",
+		StatusCode: 502,
+		Retryable:  !sc.emitted,
+	}
+	return nil, sc.finishErr
 }
 
 // convertEvent routes one complete SSE frame to a conversion target:

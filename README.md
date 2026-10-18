@@ -27,7 +27,7 @@ Plugin version: **0.2.1** (first stable release). This project is a maintained f
 - **Multi-key scheduling** - pools API keys with CPA's native scheduler (rotation, retries, cooldowns) across all routes.
 - **Session isolation** - a stable `x-opencode-session` header per conversation.
 - **Codex Multi-Agent V2 normalization** - textual agent envelopes are normalized before upstream routing under a plaintext contract (see below).
-- **Streaming lifecycle guarantees** - single-owner terminal emission, a fixed time budget per phase, and explicit failure on truncated or finish-less streams.
+- **Streaming lifecycle guarantees** - single-owner terminal emission, a fixed time budget per phase, and completion checks for translated streams, with native protocol passthrough boundaries described below.
 
 ## Requirements
 
@@ -103,7 +103,10 @@ plugins:
 
 - Clients should send a stable unique `x-opencode-session` header on every turn. It takes precedence over CPA's canonical session metadata, other recognized session headers, and the inherited first-user-turn content-hash fallback (which cannot distinguish two conversations with the same opening message).
 - On the Chat Completions upstream route, synthesized Responses and Messages streams complete when a valid finish reason and its usage trailer arrive - a redundant `[DONE]` is not required. A valid finish followed by EOF still flushes the terminal; an incomplete trailing line or EOF without a finish reason fails conversion instead of being reported as success.
+- Responses-to-Chat/Messages conversion requires a completed/incomplete terminal at EOF. Native Responses keeps its existing EOF passthrough behavior: the plugin does not invent a terminal or require ordinary frames to pass JSON validation. Once a Responses completed/incomplete event arrives, later bytes are ignored for every output format.
+- Messages-to-Responses conversion requires a valid stop reason or an explicit message_stop before it can synthesize a completion; partial text followed only by EOF cannot become a successful response. A valid stop reason followed by EOF remains supported even without the redundant message_stop event. Native Messages retains its passthrough behavior.
 - For recognized Codex clients (observed `Codex Desktop` headers and the `codex_cli_rs` user agent), a successful `response.completed` is held until converter finalization passes, then emitted as the final data-only SSE chunk immediately before downstream EOF. This compatibility behavior depends on the CPA core's Responses framer - **retest after core upgrades**. WebSocket is outside this fix.
+- Plugin shutdown stops accepting new work and drains active streams and host callbacks before returning to the loader. Debug builds record slow drains after the diagnostic threshold; callbacks that cannot be interrupted may delay shutdown until they return. Real Unix unloading requires separate platform acceptance.
 
 ### Codex Multi-Agent V2
 

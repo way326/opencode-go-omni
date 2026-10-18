@@ -242,8 +242,12 @@ func textPart(role, text string) map[string]any {
 	return map[string]any{"type": "input_text", "text": text}
 }
 
-func imagePart(url string) map[string]any {
-	return map[string]any{"type": "input_image", "image_url": url}
+func imagePart(url, detail string) map[string]any {
+	part := map[string]any{"type": "input_image", "image_url": url}
+	if detail != "" {
+		part["detail"] = detail
+	}
+	return part
 }
 
 // respToolChoice renders a shared.DecodeToolChoice kind into the Responses
@@ -281,7 +285,7 @@ func contentParts(raw json.RawMessage, role string) ([]map[string]any, *errclass
 	out := make([]map[string]any, 0, len(parts))
 	for _, p := range parts {
 		if p.ImageURL != "" {
-			out = append(out, imagePart(p.ImageURL))
+			out = append(out, imagePart(p.ImageURL, p.Detail))
 			continue
 		}
 		out = append(out, textPart(role, p.Text))
@@ -529,7 +533,7 @@ func fromClaudeMessages(upstreamModel string, body []byte, ts *pluginapi.Thinkin
 			case "text":
 				parts = append(parts, textPart(m.Role, blk.Text))
 			case "image":
-				parts = append(parts, imagePart(blk.URL))
+				parts = append(parts, imagePart(blk.URL, ""))
 			case "tool_use":
 				flush()
 				args := shared.DefaultArgs(string(blk.Input))
