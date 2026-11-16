@@ -3,6 +3,7 @@ package chatcompletions
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"testing"
 )
 
@@ -163,5 +164,99 @@ func TestResponsesReasoningToolCallKeepsNullContent(t *testing.T) {
 		if _, present := msg["reasoning_content"]; present {
 			t.Fatalf("reasoning_content must stay DeepSeek-only: %s", nonDeepSeek)
 		}
+	}
+}
+
+func TestDeepSeekToolReasoningFallbackFillsMissingHistory(t *testing.T) {
+	body := `{"input":[
+		{"type":"message","role":"user","content":"start"},
+		{"type":"function_call","call_id":"c1","name":"f","arguments":"{}"},
+		{"type":"function_call_output","call_id":"c1","output":"one"},
+		{"type":"function_call","call_id":"c2","name":"f","arguments":"{}"},
+		{"type":"function_call_output","call_id":"c2","output":"two"},
+		{"type":"function_call","call_id":"c3","name":"f","arguments":"{}"},
+		{"type":"function_call_output","call_id":"c3","output":"three"}
+	],"tools":[{"type":"function","name":"f","parameters":{"type":"object"}}]}`
+	out, eErr := BuildRequest("deepseek-v4.1-flash", "openai-response", []byte(body), nil)
+	if eErr != nil {
+		t.Fatalf("unexpected error: %v", eErr)
+	}
+	msgs := assistantHistoryMessages(t, out)
+	if len(msgs) != 3 {
+		t.Fatalf("want three assistant tool-call messages, got %d: %s", len(msgs), out)
+	}
+	for i, msg := range msgs {
+		if _, present := msg["tool_calls"]; !present {
+			t.Fatalf("assistant message %d lost tool_calls: %s", i, out)
+		}
+		if got := rawText(msg["reasoning_content"]); got != `"[reasoning unavailable]"` {
+			t.Fatalf("assistant message %d fallback reasoning = %s: %s", i, got, out)
+		}
+	}
+}
+
+func TestDeepSeekToolReasoningFallbackScope(t *testing.T) {
+	base := `{"input":[
+		{"type":"function_call","call_id":"c1","name":"f","arguments":"{}"}
+	]%s}`
+	tools := `,"tools":[{"type":"function","name":"f","parameters":{"type":"object"}}]`
+	for _, tc := range []struct {
+		name          string
+		model         string
+		tools         string
+		wantReasoning bool
+	}{
+		{name: "deepseek with tools", model: "deepseek-v4.1-flash", tools: tools, wantReasoning: true},
+		{name: "deepseek without tools", model: "deepseek-v4.1-flash"},
+		{name: "non-deepseek with tools", model: "glm-5.2", tools: tools},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := fmt.Sprintf(base, tc.tools)
+			out, eErr := BuildRequest(tc.model, "openai-response", []byte(body), nil)
+			if eErr != nil {
+				t.Fatalf("unexpected error: %v", eErr)
+			}
+			msgs := assistantHistoryMessages(t, out)
+			if len(msgs) != 1 {
+				t.Fatalf("want one assistant message, got %d: %s", len(msgs), out)
+			}
+			_, present := msgs[0]["reasoning_content"]
+			if present != tc.wantReasoning {
+				t.Fatalf("reasoning_content present=%v want %v: %s", present, tc.wantReasoning, out)
+			}
+		})
+	}
+}
+
+func TestDeepSeekToolReasoningPreservesExistingText(t *testing.T) {
+	body := `{"input":[
+		{"type":"reasoning","summary":[{"type":"summary_text","text":"think"}]},
+		{"type":"function_call","call_id":"c1","name":"f","arguments":"{}"}
+	],"tools":[{"type":"function","name":"f","parameters":{"type":"object"}}]}`
+	out, eErr := BuildRequest("deepseek-v4.1-flash", "openai-response", []byte(body), nil)
+	if eErr != nil {
+		t.Fatalf("unexpected error: %v", eErr)
+	}
+	msgs := assistantHistoryMessages(t, out)
+	if got := rawText(msgs[0]["reasoning_content"]); got != `"think"` {
+		t.Fatalf("existing reasoning was replaced by fallback: %s", out)
+	}
+}
+
+func TestDeepSeekEncryptedReasoningWithToolCallUsesFallback(t *testing.T) {
+	body := `{"input":[
+		{"type":"reasoning","encrypted_content":"opaque-secret"},
+		{"type":"function_call","call_id":"c1","name":"f","arguments":"{}"}
+	],"tools":[{"type":"function","name":"f","parameters":{"type":"object"}}]}`
+	out, eErr := BuildRequest("opencode-go/deepseek-v4.1-flash", "openai-response", []byte(body), nil)
+	if eErr != nil {
+		t.Fatalf("unexpected error: %v", eErr)
+	}
+	msgs := assistantHistoryMessages(t, out)
+	if len(msgs) != 1 {
+		t.Fatalf("want one assistant message, got %d: %s", len(msgs), out)
+	}
+	if got := rawText(msgs[0]["reasoning_content"]); got != `"[reasoning unavailable]"` {
+		t.Fatalf("encrypted-only reasoning fallback = %s: %s", got, out)
 	}
 }

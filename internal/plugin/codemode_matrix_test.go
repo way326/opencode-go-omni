@@ -10,11 +10,11 @@
 // this machine still has its protocol routing pinned here.
 //
 // Fixture provenance:
-//   - IDs: the 37-model 2026-10-17 live catalog
-//     (dist/all-model-codemode-20261017/go-transport-catalog-body.json) plus
-//     the same-day additions step-5-preview and beam-free. The five IDs that
-//     left the live catalog are kept as a legacy cohort so the compatibility
-//     tables stay covered without claiming those models are still served.
+//   - IDs: the 37 routable entries from the 38-model 2026-10-27 live catalog.
+//     iceman-contributor-free is intentionally omitted while its upstream
+//     endpoint returns 503. Eight IDs that left the live catalog are kept as a
+//     legacy cohort so the compatibility tables stay covered without claiming
+//     those models are still served.
 //   - Routes: the product tables in internal/catalog (prefixRoutes plus the
 //     exactRoutes entries, including beam-free -> chat-completions).
 //   - Wire shape: dist/codemode-align-20261017/candidate-native-5/
@@ -56,9 +56,9 @@ type codeModeMatrixModel struct {
 	cohort codeModeCohort
 }
 
-// codeModeMatrixModels is the 42-ID offline matrix: 37 live IDs + beam-free
-// and step-5-preview (2026-10-17 additions) + the five IDs that left the live
-// catalog but still exercise the compatibility tables.
+// codeModeMatrixModels is the 45-ID offline matrix: 37 live routable IDs plus
+// eight IDs that left the live catalog but still exercise the compatibility
+// tables.
 var codeModeMatrixModels = []codeModeMatrixModel{
 	{"deepseek-v4.1-flash", catalog.RouteChatCompletions, codeModeLive},
 	{"deepseek-v4-pro", catalog.RouteChatCompletions, codeModeLive},
@@ -79,17 +79,17 @@ var codeModeMatrixModels = []codeModeMatrixModel{
 	{"kimi-k2.6", catalog.RouteChatCompletions, codeModeLive},
 	{"kimi-k2.7-code", catalog.RouteChatCompletions, codeModeLive},
 	{"kimi-k3", catalog.RouteChatCompletions, codeModeLive},
+	{"kimi-k3.1-pro", catalog.RouteChatCompletions, codeModeLive},
 	{"mimo-v2.5", catalog.RouteChatCompletions, codeModeLive},
 	{"mimo-v2.6-flash", catalog.RouteChatCompletions, codeModeLive},
 	{"mimo-v2.5-pro", catalog.RouteChatCompletions, codeModeLive},
 	{"mimo-v2.6-pro", catalog.RouteChatCompletions, codeModeLive},
 	{"minimax-m2.5", catalog.RouteMessages, codeModeLive},
 	{"minimax-m2.7", catalog.RouteMessages, codeModeLive},
-	{"gemini-4-argon-contributor", catalog.RouteGemini, codeModeLive},
+	{"gemini-4-argon", catalog.RouteGemini, codeModeLive},
 	{"minimax-m3", catalog.RouteMessages, codeModeLive},
-	{"space-bunny", catalog.RouteChatCompletions, codeModeLive},
+	{"minimax-m3.1-flash", catalog.RouteMessages, codeModeLive},
 	{"longcat-2.0", catalog.RouteChatCompletions, codeModeLive},
-	{"longcat-2.5-preview-free", catalog.RouteChatCompletions, codeModeLive},
 	{"step-5-preview", catalog.RouteChatCompletions, codeModeLive},
 	{"beam-free", catalog.RouteChatCompletions, codeModeLive},
 	{"qwen3.6-plus", catalog.RouteChatCompletions, codeModeLive},
@@ -102,6 +102,9 @@ var codeModeMatrixModels = []codeModeMatrixModel{
 	{"deepseek-flash", catalog.RouteChatCompletions, codeModeLegacy},
 	{"step-5-preview-free", catalog.RouteChatCompletions, codeModeLegacy},
 	{"cat-jam-free", catalog.RouteChatCompletions, codeModeLegacy},
+	{"gemini-4-argon-contributor", catalog.RouteGemini, codeModeLegacy},
+	{"longcat-2.5-preview-free", catalog.RouteChatCompletions, codeModeLegacy},
+	{"space-bunny", catalog.RouteChatCompletions, codeModeLegacy},
 }
 
 // codeModeGrammarDefinition is a trimmed but structurally faithful copy of the
@@ -1046,9 +1049,8 @@ func codeModeManager(t *testing.T, host *codeModeHost) (*Manager, *fakeCaller) {
 }
 
 // TestCodeModeMatrixCatalogDiscovery pins that every live matrix ID is
-// discovered and routed to its documented protocol, that the two 2026-10-17
-// additions resolve (beam-free through its exact route), and that a legacy ID
-// which left the live catalog may be unroutable without failing the matrix.
+// discovered and routed to its documented protocol, and that a legacy ID which
+// left the live catalog may be unroutable without failing the matrix.
 func TestCodeModeMatrixCatalogDiscovery(t *testing.T) {
 	host := &codeModeHost{t: t}
 	m, _ := codeModeManager(t, host)
@@ -1080,15 +1082,6 @@ func TestCodeModeMatrixCatalogDiscovery(t *testing.T) {
 		}
 		if rec.PublicID != "opencode-go/"+want.id {
 			t.Errorf("%s: public id = %q", want.id, rec.PublicID)
-		}
-	}
-	for _, addition := range []string{"beam-free", "step-5-preview"} {
-		rec, ok := byID[addition]
-		if !ok {
-			t.Fatalf("%s: live addition missing from discovery", addition)
-		}
-		if rec.Protocol != catalog.RouteChatCompletions || rec.EndpointPath != "/v1/chat/completions" {
-			t.Errorf("%s: %+v, want the chat-completions route", addition, rec)
 		}
 	}
 	for _, unsupported := range mgr.Unsupported() {

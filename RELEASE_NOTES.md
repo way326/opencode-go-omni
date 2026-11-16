@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### Claude tool-result image bridge
+
+- Translate image-bearing Anthropic tool results into the legal Chat
+  Completions shape: keep a textual role tool receipt with the original call
+  ID, then attach the ordered text/image data in a following user message.
+- Require a complete, uniquely paired tool batch before emitting attachments.
+  Preserve parallel result order and mixed text/image order while rejecting
+  orphaned, duplicated, incomplete or malformed image results before any
+  upstream inference request.
+- Leave existing text-only tool-result translation unchanged. This bridge
+  establishes legal conversion, not that every OpenCode Go upstream model can
+  infer from the attached image; live model recognition requires separate
+  acceptance.
+
 ### Review fixes: stream completion, session affinity and shutdown
 
 - Validate EOF completion when converting Responses streams to Chat or

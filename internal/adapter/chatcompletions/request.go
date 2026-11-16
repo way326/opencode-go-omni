@@ -191,15 +191,17 @@ func claudeToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSuppo
 	if src.System != "" {
 		out.Messages = append(out.Messages, ccMessage{Role: "system", Content: src.System})
 	}
+	var expectedToolCalls *claudeToolCallBatch
 	for i := range src.Messages {
 		m := &src.Messages[i]
 		switch m.Role {
 		case "user":
-			msgs, eErr := claudeUserMessages(m)
+			msgs, eErr := claudeUserMessages(m, expectedToolCalls)
 			if eErr != nil {
 				return nil, eErr
 			}
 			out.Messages = append(out.Messages, msgs...)
+			expectedToolCalls = nil
 		case "assistant":
 			msg, eErr := claudeAssistantMessage(m)
 			if eErr != nil {
@@ -208,6 +210,7 @@ func claudeToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSuppo
 			if msg != nil {
 				out.Messages = append(out.Messages, *msg)
 			}
+			expectedToolCalls = claudeToolCallBatchFromAssistant(m)
 		case "system":
 			var sb strings.Builder
 			sb.WriteString(m.Content)
@@ -225,6 +228,7 @@ func claudeToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSuppo
 			if sb.Len() > 0 {
 				out.Messages = append(out.Messages, ccMessage{Role: "system", Content: sb.String()})
 			}
+			expectedToolCalls = nil
 		default:
 			return nil, shared.ValidateRole(m.Role, EndpointPath)
 		}
@@ -252,7 +256,14 @@ func claudeResultText(content json.RawMessage) (string, *errclass.Error) {
 // text/image blocks become one user message (plain string when only
 // text), each tool_result block becomes a separate role:"tool" message
 // carrying its tool_use_id (FR-005).
-func claudeUserMessages(m *shared.ClaudeMessageRecord) ([]ccMessage, *errclass.Error) {
+func claudeUserMessages(m *shared.ClaudeMessageRecord, expectedToolCalls *claudeToolCallBatch) ([]ccMessage, *errclass.Error) {
+	if claudeMessageHasToolResultImage(m) {
+		return claudeImageToolUserMessages(m, expectedToolCalls)
+	}
+	return claudeTextUserMessages(m)
+}
+
+func claudeTextUserMessages(m *shared.ClaudeMessageRecord) ([]ccMessage, *errclass.Error) {
 	var msgs []ccMessage
 	var parts []ccContentPart
 	flush := func() {
@@ -514,7 +525,28 @@ func responsesToChat(upstreamModel string, body []byte, ts *pluginapi.ThinkingSu
 			Function: shared.CCFunction{Name: t.Name, Description: t.Description, Parameters: schema},
 		})
 	}
+	ensureDeepSeekToolReasoning(upstreamModel, out)
 	return encode(out), nil
+}
+
+const unavailableDeepSeekReasoning = "[reasoning unavailable]"
+
+// ensureDeepSeekToolReasoning marks assistant tool-call turns whose reasoning
+// was not available in the replay history. OpenCode's DeepSeek thinking route
+// requires reasoning_content on every assistant tool-call message when tools
+// are declared; the marker makes the loss explicit without forwarding an
+// opaque encrypted payload as if it were plain chain-of-thought text.
+func ensureDeepSeekToolReasoning(upstreamModel string, req *ccRequest) {
+	if !isDeepSeekModel(upstreamModel) || len(req.Tools) == 0 {
+		return
+	}
+	for i := range req.Messages {
+		message := &req.Messages[i]
+		if message.Role == "assistant" && len(message.ToolCalls) > 0 &&
+			strings.TrimSpace(message.ReasoningContent) == "" {
+			message.ReasoningContent = unavailableDeepSeekReasoning
+		}
+	}
 }
 
 func isDeepSeekModel(model string) bool {

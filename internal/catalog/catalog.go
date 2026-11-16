@@ -220,10 +220,11 @@ var prefixRoutes = []struct {
 // is a pending-acceptance marker, not a claim that streaming works.
 const omenAlphaNote = `model "omen-alpha" routed via compatibility fallback (chat-completions); upstream stream acceptance pending`
 
-// exactRoutes pins the models whose documented upstream protocol differs from
-// what their family prefix would give them (arch §5 route priority). The table
-// is consulted after user overrides and before prefixRoutes, so an override
-// still wins and an unknown ID still falls through to the prefix table.
+// exactRoutes pins models that need an exact route: their documented upstream
+// protocol differs from what their family prefix gives them, or they have no
+// safely supported family prefix at all (arch §5 route priority). The table is
+// consulted after user overrides and before prefixRoutes, so an override still
+// wins and an unknown ID still falls through to the prefix table.
 //
 // Evidence: the models.dev opencode-go snapshot lists qwen3.6-plus and
 // qwen3.7-max with no provider.npm override, so they inherit the provider
@@ -233,6 +234,11 @@ const omenAlphaNote = `model "omen-alpha" routed via compatibility fallback (cha
 // beam-free appears in the 2026-10-17 live catalog and models.dev snapshot;
 // its absent npm override inherits the provider's Chat Completions default.
 // Pin this exact ID rather than assuming a protocol for future beam variants.
+//
+// iceman-contributor-free is intentionally absent while its upstream endpoint
+// is unavailable (503 observed 2026-10-27). OpenCode's Go documentation and
+// models.dev declare Chat Completions, but no route is pinned until inference
+// can be accepted; the catalog therefore reports it as unsupported.
 var exactRoutes = []struct {
 	id    string
 	route Route

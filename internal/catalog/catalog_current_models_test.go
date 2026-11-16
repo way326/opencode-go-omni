@@ -23,68 +23,68 @@ import (
 // separately-justified compatibility entry (see omenAlphaNote) and not as a
 // family prefix.
 // currentCatalogModels is the live OpenCode Go catalog as returned by a
-// read-only GET of /inference/go/v1/models: 40 model IDs, each paired with the
-// route its upstream protocol metadata documents.
+// read-only GET of /inference/go/v1/models on 2026-10-27: 38 model IDs, each
+// paired with its upstream-declared protocol. One entry is temporarily
+// disabled from routing until its upstream endpoint accepts inference.
 //
-// Evidence: the live GET is the primary source for membership. The models.dev
-// opencode-go snapshot (work/models-dev-api.json) supplies the protocol
-// evidence and covers 36 of the 40 IDs: provider default npm
-// @ai-sdk/openai-compatible is Chat Completions, and a per-model provider.npm
-// override selects @ai-sdk/google -> Gemini, @ai-sdk/anthropic -> Messages, or
-// @ai-sdk/openai -> Responses. The snapshot also lists grok-4.5 and
-// space-bunny-free, which the live catalog does not serve; those two are
-// deliberately kept out of this fixture.
-//
-// Three IDs carry no protocol metadata: glm-5.1, minimax-m2.5 and
-// deepseek-flash inherit the plugin's documented family compatibility
-// (glm/deepseek -> Chat Completions, minimax -> Messages). omen-alpha is the
-// single entry whose upstream behavior is not yet confirmed and is routed
-// through the exact compatibility table with a pending-acceptance diagnostic
-// (see omenAlphaNote).
+// Evidence: the live GET supplies membership. Against the archived 2026-10-18
+// 37-ID snapshot, four IDs were added (gemini-4-argon, iceman-contributor-free,
+// kimi-k3.1-pro, minimax-m3.1-flash) and three were removed
+// (gemini-4-argon-contributor, longcat-2.5-preview-free, space-bunny). The new
+// family routes agree with models.dev and OpenCode's Go documentation.
+// iceman-contributor-free declares Chat Completions but every Chat and
+// Responses probe returned 503, so no route is pinned yet; omen-alpha remains
+// the single unverified compatibility fallback and carries the pending-
+// acceptance diagnostic (see omenAlphaNote).
 var currentCatalogModels = []struct {
 	id    string
 	route Route
 }{
-	{"deepseek-v4-flash", RouteChatCompletions},
-	{"deepseek-v4-flash-vision-exp", RouteChatCompletions},
-	{"deepseek-flash", RouteChatCompletions},
-	{"deepseek-v4.1-flash", RouteChatCompletions},
+	{"beam-free", RouteChatCompletions},
+	{"claude-haiku-5-5", RouteMessages},
 	{"deepseek-v4-pro", RouteChatCompletions},
+	{"deepseek-v4.1-flash", RouteChatCompletions},
+	{"gemini-4-argon", RouteGemini},
 	{"glm-5.1", RouteChatCompletions},
 	{"glm-5.2", RouteChatCompletions},
 	{"glm-5.3", RouteChatCompletions},
-	{"grok-4.6", RouteResponses},
-	{"grok-4.7", RouteResponses},
-	{"muse-spark-1.2-contributor", RouteResponses},
-	{"muse-spark-1.3-contributor", RouteResponses},
 	{"glm-5.3-flash", RouteChatCompletions},
-	{"omen-alpha", RouteChatCompletions},
 	{"gpt-5.6-luna", RouteResponses},
 	{"gpt-6-luna", RouteResponses},
-	{"claude-haiku-5-5", RouteMessages},
+	{"grok-4.6", RouteResponses},
+	{"grok-4.7", RouteResponses},
 	{"hy3", RouteChatCompletions},
 	{"hy4-preview", RouteChatCompletions},
+	{"iceman-contributor-free", RouteChatCompletions},
 	{"kimi-k2.6", RouteChatCompletions},
 	{"kimi-k2.7-code", RouteChatCompletions},
 	{"kimi-k3", RouteChatCompletions},
+	{"kimi-k3.1-pro", RouteChatCompletions},
+	{"longcat-2.0", RouteChatCompletions},
+	{"muse-spark-1.2-contributor", RouteResponses},
+	{"muse-spark-1.3-contributor", RouteResponses},
 	{"mimo-v2.5", RouteChatCompletions},
-	{"mimo-v2.6-flash", RouteChatCompletions},
 	{"mimo-v2.5-pro", RouteChatCompletions},
+	{"mimo-v2.6-flash", RouteChatCompletions},
 	{"mimo-v2.6-pro", RouteChatCompletions},
 	{"minimax-m2.5", RouteMessages},
 	{"minimax-m2.7", RouteMessages},
-	{"gemini-4-argon-contributor", RouteGemini},
 	{"minimax-m3", RouteMessages},
-	{"space-bunny", RouteChatCompletions},
-	{"longcat-2.0", RouteChatCompletions},
-	{"longcat-2.5-preview-free", RouteChatCompletions},
-	{"step-5-preview-free", RouteChatCompletions},
-	{"cat-jam-free", RouteChatCompletions},
+	{"minimax-m3.1-flash", RouteMessages},
+	{"omen-alpha", RouteChatCompletions},
 	{"qwen3.6-plus", RouteChatCompletions},
 	{"qwen3.7-max", RouteChatCompletions},
-	{"qwen3.8-max", RouteMessages},
-	{"qwen3.8-flash", RouteMessages},
 	{"qwen3.7-plus", RouteMessages},
+	{"qwen3.8-flash", RouteMessages},
+	{"qwen3.8-max", RouteMessages},
+	{"step-5-preview", RouteChatCompletions},
+}
+
+// temporarilyDisabledCatalogModels names live catalog entries that are kept
+// out of the routable set until their upstream endpoint is usable. The value
+// records the declared protocol so re-enabling remains an explicit decision.
+var temporarilyDisabledCatalogModels = map[string]Route{
+	"iceman-contributor-free": RouteChatCompletions,
 }
 
 // currentCatalogIDs returns the fixture IDs in declaration order.
@@ -116,21 +116,29 @@ func wantEndpoint(id string, route Route) string {
 	return route.EndpointPath()
 }
 
-// TestCurrentCatalogKnownModelsRouteAsDocumented pins every model of the live
-// 40-model catalog to the protocol its upstream metadata documents, so the
-// catalog's dynamic discovery cannot silently mis-route a model the way the
-// qwen family prefix did for qwen3.6-plus and qwen3.7-max.
+// TestCurrentCatalogKnownModelsRouteAsDocumented pins every routable model of
+// the live 38-entry catalog to its documented protocol, and pins the one
+// temporarily disabled entry as unsupported. This prevents dynamic discovery
+// from silently mis-routing a model the way the qwen family prefix did for
+// qwen3.6-plus and qwen3.7-max.
 func TestCurrentCatalogKnownModelsRouteAsDocumented(t *testing.T) {
 	m := currentCatalogManager(t, testCfg())
 
 	models := m.Models()
-	if len(models) != 40 {
-		t.Fatalf("routable = %d models, want the 40 live catalog IDs", len(models))
+	wantRoutable := len(currentCatalogModels) - len(temporarilyDisabledCatalogModels)
+	if len(models) != wantRoutable {
+		t.Fatalf("routable = %d models, want %d", len(models), wantRoutable)
 	}
-	if len(currentCatalogModels) != 40 {
-		t.Fatalf("fixture lists %d IDs, want 40", len(currentCatalogModels))
+	if len(currentCatalogModels) != 38 {
+		t.Fatalf("fixture lists %d IDs, want 38", len(currentCatalogModels))
 	}
 	for _, want := range currentCatalogModels {
+		if _, disabled := temporarilyDisabledCatalogModels[want.id]; disabled {
+			if _, ok := m.Lookup("opencode-go/" + want.id); ok {
+				t.Errorf("%s: temporarily disabled model is routable", want.id)
+			}
+			continue
+		}
 		got := findModel(t, models, want.id)
 		if got.Protocol != want.route {
 			t.Errorf("%s: Protocol = %q, want %q", want.id, got.Protocol, want.route)
@@ -145,8 +153,23 @@ func TestCurrentCatalogKnownModelsRouteAsDocumented(t *testing.T) {
 			t.Errorf("Lookup(%q) = %+v %v", want.id, rec, ok)
 		}
 	}
-	if unsup := m.Unsupported(); len(unsup) != 0 {
-		t.Fatalf("unsupported = %+v, want none of the known models excluded", unsup)
+	unsup := m.Unsupported()
+	if len(unsup) != len(temporarilyDisabledCatalogModels) {
+		t.Fatalf("unsupported = %+v, want only the temporarily disabled entries", unsup)
+	}
+	for id := range temporarilyDisabledCatalogModels {
+		found := false
+		for _, u := range unsup {
+			if u.UpstreamID == id {
+				found = true
+				if u.Reason != "no route determined" {
+					t.Errorf("%s: reason = %q, want no route determined", id, u.Reason)
+				}
+			}
+		}
+		if !found {
+			t.Errorf("%s: missing from unsupported diagnostics", id)
+		}
 	}
 	// omen-alpha is the only entry that carries a diagnostic.
 	warns := m.Warnings()
@@ -331,28 +354,35 @@ func TestOmenAlphaCompatibilityFallbackDiagnostics(t *testing.T) {
 
 // TestExactCompatibilityTableStaysMinimal pins the exact table to the IDs with
 // a documented reason: the two provider-default qwen IDs, the unlisted
-// omen-alpha entry, and the provider-default beam-free ID. A family prefix
-// must not be used for any of them.
+// omen-alpha fallback, and beam-free. A family prefix must not be used for any
+// of them, and the temporarily disabled iceman entry must stay unrouted.
 func TestExactCompatibilityTableStaysMinimal(t *testing.T) {
-	want := map[string]bool{"qwen3.6-plus": true, "qwen3.7-max": true, "omen-alpha": true, "beam-free": true}
+	want := map[string]Route{
+		"qwen3.6-plus": RouteChatCompletions,
+		"qwen3.7-max":  RouteChatCompletions,
+		"omen-alpha":   RouteChatCompletions,
+		"beam-free":    RouteChatCompletions,
+	}
 	if len(exactRoutes) != len(want) {
 		t.Fatalf("exactRoutes = %+v, want %d entries", exactRoutes, len(want))
 	}
 	for _, r := range exactRoutes {
-		if !want[r.id] {
+		if got, ok := want[r.id]; !ok {
 			t.Errorf("unexpected exact entry %q", r.id)
-		}
-		if r.route != RouteChatCompletions {
-			t.Errorf("%s: route = %q, want chat-completions", r.id, r.route)
+		} else if r.route != got {
+			t.Errorf("%s: route = %q, want %q", r.id, r.route, got)
 		}
 	}
 	for _, p := range prefixRoutes {
-		if p.prefix == "omen" || p.prefix == "beam" {
+		if p.prefix == "omen" || p.prefix == "beam" || p.prefix == "iceman" {
 			t.Errorf("prefixRoutes contains %q; the supported model is an exact entry", p.prefix)
 		}
 	}
 	if _, ok := exactRoute("omen-unknown"); ok {
 		t.Error("omen-unknown resolved through the exact table")
+	}
+	if _, ok := exactRoute("iceman-contributor-free"); ok {
+		t.Error("temporarily disabled iceman resolved through the exact table")
 	}
 	if d, ok := exactRoute("OMEN-ALPHA"); !ok || d.route != RouteChatCompletions {
 		t.Error("exact lookup must fold case like the prefix table")

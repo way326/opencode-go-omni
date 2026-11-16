@@ -4,6 +4,7 @@
 package plugin
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -109,37 +110,91 @@ type hostLogReq struct {
 	Fields  map[string]any `json:"fields"`
 }
 
-// AuthSave persists one plugin-owned auth record through the host. The
-// credential is deliberately accepted only as JSON here; callers must not put
-// it in logs or error text.
+// AuthSave persists one plugin-owned auth record through the host. The host
+// ABI replaces the whole JSON file and provides no compare-and-swap; callers
+// must not treat this as protection against concurrent CPA/user writes. The
+// credential is deliberately accepted only as JSON here and never belongs in
+// logs or error text.
 func (b *HostBridge) AuthSave(ctx context.Context, req pluginapi.HostAuthSaveRequest) error {
 	payload, err := json.Marshal(req)
 	if err != nil {
 		return fmt.Errorf("host auth save failed: invalid request")
 	}
-	raw, err := b.callWithTimeout(ctx, pluginabi.MethodHostAuthSave, payload)
+	// A save may have reached the host before its context expires. Waiting here
+	// keeps a timed-out or cancelled batch from starting another generation's
+	// write while this one is still able to persist.
+	raw, err := b.callBlocking(ctx, pluginabi.MethodHostAuthSave, payload)
 	if err != nil {
 		if strings.Contains(err.Error(), "timed out") {
 			return fmt.Errorf("host auth save failed: timed out")
 		}
 		return fmt.Errorf("host auth save failed")
 	}
-	env, err := decodeEnvelope(raw)
-	if err != nil {
-		return fmt.Errorf("host auth save failed: %w", err)
-	}
-	if !env.OK {
-		// Host error text is not trusted and may echo credential JSON.
-		return fmt.Errorf("host auth save failed")
+	if _, err := decodeAuthHostEnvelope(raw, nil, "host auth save failed"); err != nil {
+		return err
 	}
 	return nil
+}
+
+// AuthGet returns the physical JSON backing one AuthIndex. The response may
+// contain credential material, so every transport or host failure is reduced
+// to a fixed error that cannot echo the host's response body.
+func (b *HostBridge) AuthGet(ctx context.Context, authIndex string) (pluginapi.HostAuthGetResponse, error) {
+	authIndex = strings.TrimSpace(authIndex)
+	if authIndex == "" {
+		return pluginapi.HostAuthGetResponse{}, fmt.Errorf("host auth get failed: auth_index is required")
+	}
+	payload, err := json.Marshal(pluginapi.HostAuthGetRequest{AuthIndex: authIndex})
+	if err != nil {
+		return pluginapi.HostAuthGetResponse{}, fmt.Errorf("host auth get failed: invalid request")
+	}
+	raw, err := b.callWithTimeout(ctx, pluginabi.MethodHostAuthGet, payload)
+	env, err := decodeAuthHostEnvelope(raw, err, "host auth get failed")
+	if err != nil {
+		return pluginapi.HostAuthGetResponse{}, err
+	}
+	if len(env.Result) == 0 {
+		return pluginapi.HostAuthGetResponse{}, fmt.Errorf("host auth get failed: missing response body")
+	}
+	var resp pluginapi.HostAuthGetResponse
+	if json.Unmarshal(env.Result, &resp) != nil {
+		return pluginapi.HostAuthGetResponse{}, fmt.Errorf("host auth get failed: undecodable response body")
+	}
+	if resp.AuthIndex != authIndex {
+		return pluginapi.HostAuthGetResponse{}, fmt.Errorf("host auth get failed: auth_index mismatch")
+	}
+	if len(resp.JSON) == 0 || bytes.Equal(bytes.TrimSpace(resp.JSON), []byte("null")) {
+		return pluginapi.HostAuthGetResponse{}, fmt.Errorf("host auth get failed: missing auth json")
+	}
+	return resp, nil
+}
+
+// decodeAuthHostEnvelope validates an auth callback without trusting host
+// supplied error text, which may contain credential data.
+func decodeAuthHostEnvelope(raw []byte, callErr error, action string) (pluginabi.Envelope, error) {
+	if callErr != nil {
+		if strings.Contains(callErr.Error(), "timed out") {
+			return pluginabi.Envelope{}, fmt.Errorf("%s: timed out", action)
+		}
+		return pluginabi.Envelope{}, fmt.Errorf("%s", action)
+	}
+	env, err := decodeEnvelope(raw)
+	if err != nil {
+		return pluginabi.Envelope{}, fmt.Errorf("%s: %w", action, err)
+	}
+	if !env.OK {
+		return pluginabi.Envelope{}, fmt.Errorf("%s", action)
+	}
+	return env, nil
 }
 
 // AuthList returns the auth records currently known by CPA without modifying
 // their files. Callers use stable names/IDs to avoid overwriting CPA-managed
 // metadata during plugin registration.
 func (b *HostBridge) AuthList(ctx context.Context) ([]pluginapi.HostAuthFileEntry, error) {
-	env, err := b.invoke(ctx, pluginabi.MethodHostAuthList, struct{}{}, "host auth list")
+	payload, _ := json.Marshal(struct{}{})
+	raw, callErr := b.callWithTimeout(ctx, pluginabi.MethodHostAuthList, payload)
+	env, err := decodeAuthHostEnvelope(raw, callErr, "host auth list failed")
 	if err != nil {
 		return nil, err
 	}
@@ -188,6 +243,27 @@ func decodeEnvelope(raw []byte) (pluginabi.Envelope, error) {
 func (b *HostBridge) callWithTimeout(ctx context.Context, method string, payload []byte) ([]byte, error) {
 	raw, _, err := b.callWithTimeoutResult(ctx, method, payload, 0, nil)
 	return raw, err
+}
+
+// callBlocking performs a callback that may have an irreversible host-side
+// effect. Context cancellation is checked before the call, but once started
+// the callback is allowed to return synchronously so callers never mistake an
+// unknown side effect for a completed timeout.
+func (b *HostBridge) callBlocking(ctx context.Context, method string, payload []byte) (raw []byte, err error) {
+	select {
+	case <-ctx.Done():
+		return nil, fmt.Errorf("host call %s timed out", method)
+	default:
+	}
+	b.inFlight.Add(1)
+	defer b.inFlight.Done()
+	defer func() {
+		if recover() != nil {
+			raw = nil
+			err = fmt.Errorf("host callback panicked")
+		}
+	}()
+	return b.call(method, payload)
 }
 
 // streamTimeoutGrace bounds how long a timed-out host.http.do_stream start

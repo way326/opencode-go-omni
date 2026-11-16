@@ -42,6 +42,9 @@ const registerRefreshTimeout = 10 * time.Second
 // loop) and routes every RPC method. Safe for concurrent HandleCall use.
 type Manager struct {
 	bridge *HostBridge // immutable after NewManager
+	// authSync serializes catalog revision writes across lifecycle and ticker
+	// callbacks owned by this Manager.
+	authSync *catalogRevisionSyncer
 
 	// lifeMu serializes whole register/reconfigure/shutdown sequences so
 	// their stop-wait-install steps cannot interleave into orphaned tickers.
@@ -69,7 +72,7 @@ type Manager struct {
 
 // NewManager returns a dispatcher whose outbound traffic flows through bridge.
 func NewManager(bridge *HostBridge) *Manager {
-	return &Manager{bridge: bridge}
+	return &Manager{bridge: bridge, authSync: newCatalogRevisionSyncer(bridge)}
 }
 
 // HandleCall dispatches one RPC method and returns envelope bytes. Handler
@@ -396,7 +399,17 @@ func (m *Manager) handleLifecycleAdmitted(request []byte, epoch uint64) ([]byte,
 		mgr.SeedFrom(m.mgr)
 	}
 	m.mgr = mgr
+	m.mu.Unlock()
+
+	// Publish the new Manager before asking CPA to re-read auth files: the
+	// watcher may call model.for_auth while this lifecycle call is still active.
+	// The next ticker generation is installed only after this batch finishes.
+	syncCtx, syncCancel := context.WithTimeout(context.Background(), registerRefreshTimeout)
+	m.syncCatalogRevision(syncCtx, mgr)
+	syncCancel()
+
 	stop, done := make(chan struct{}), make(chan struct{})
+	m.mu.Lock()
 	m.stop, m.done = stop, done
 	interval := cfg.Catalog.RefreshInterval
 	m.mu.Unlock()
@@ -465,25 +478,7 @@ func (m *Manager) materializeAuthRecords(ctx context.Context, cfg config.Config)
 // good catalog snapshot mapped to wire ModelInfos; empty catalog yields an
 // empty slice, not an error.
 func (m *Manager) handleModels() ([]byte, error) {
-	m.mu.RLock()
-	mgr := m.mgr
-	m.mu.RUnlock()
-	models := make([]pluginapi.ModelInfo, 0)
-	if mgr != nil {
-		for _, rec := range mgr.Models() {
-			models = append(models, pluginapi.ModelInfo{
-				ID:                        rec.PublicID,
-				Object:                    "model",
-				OwnedBy:                   ProviderID,
-				DisplayName:               rec.DisplayName,
-				ContextLength:             rec.ContextLimit,
-				MaxCompletionTokens:       rec.OutputLimit,
-				SupportedInputModalities:  rec.InputModes,
-				SupportedOutputModalities: rec.OutputModes,
-				Thinking:                  rec.Thinking,
-			})
-		}
-	}
+	models := m.servedModelInfos()
 	return okEnvelope(pluginapi.ModelResponse{Provider: ProviderID, Models: models}), nil
 }
 
@@ -684,10 +679,32 @@ func (m *Manager) startRefreshLoop(cfg config.Config, mgr *catalog.Manager, inte
 						}
 					}()
 					refreshOnce(stopCtx, mgr, m.bridge, cfg.RequestTimeout, cfg)
+					m.syncCatalogRevision(stopCtx, mgr)
 				}()
 			}
 		}
 	}()
+}
+
+// syncCatalogRevision derives a revision from the final served projection and
+// asks the syncer to inspect every plugin Auth. Per-file revision comparison
+// avoids unnecessary saves while still discovering Auth files added later.
+// Host callbacks receive the captured mgr; they never read Manager state.
+func (m *Manager) syncCatalogRevision(ctx context.Context, mgr *catalog.Manager) {
+	if m == nil || m.bridge == nil || m.authSync == nil || mgr == nil {
+		return
+	}
+	revision, err := catalogRevision(publishedModelInfos(mgr.Models()))
+	if err != nil {
+		_ = m.bridge.Log("warn", "catalog sync revision failed", nil)
+		return
+	}
+	stats, err := m.authSync.syncRevision(ctx, revision)
+	if err != nil {
+		return
+	}
+	debugTrace("catalog sync candidates=%d saved=%d unchanged=%d failed=%d",
+		stats.Candidates, stats.Saved, stats.Unchanged, stats.Failed)
 }
 
 // closeStop signals a running loop to exit and clears the stop/done pair.
