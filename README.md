@@ -9,7 +9,7 @@
 - OpenAI **Responses**
 - Google **Gemini GenerateContent** (`/v1/models/{model}:generateContent`, `:streamGenerateContent?alt=sse`)
 
-Plugin version: **0.2.1** (first stable release). This project is a maintained fork of [massiveits/opencode-go-cliproxyapi](https://github.com/massiveits/opencode-go-cliproxyapi), revision `a4369b9b1cf18a4111a0167e3b50e5d69054fe45` (plugin 0.1.10); the upstream MIT license and attribution are retained (see [License & attribution](#license--attribution)).
+Plugin version: **0.2.2**. This project is a maintained fork of [massiveits/opencode-go-cliproxyapi](https://github.com/massiveits/opencode-go-cliproxyapi), revision `a4369b9b1cf18a4111a0167e3b50e5d69054fe45` (plugin 0.1.10); the upstream MIT license and attribution are retained (see [License & attribution](#license--attribution)).
 
 > The original upstream plugin and this fork must **not** be enabled at the same time - both claim the `opencode-go` provider.
 
@@ -154,7 +154,7 @@ Working documents from before the rename to `opencode-go-omni` (validation recor
 ## Compatibility & status
 
 - Plugin ABI 1 / RPC schema 6; compiled against the CPA v8 plugin SDK pinned in `go.mod`. Development validation ran against CPA core v8.0.30-v8.0.31; re-verify the Codex Responses terminal behavior after CPA core upgrades.
-- Stable release: `0.2.1` (`v0.2.1` tag). Install the matching package from the [GitHub Releases](https://github.com/way326/opencode-go-omni/releases) page.
+- Stable release: `0.2.2` (`v0.2.2` tag). Install the matching package from the [GitHub Releases](https://github.com/way326/opencode-go-omni/releases) page.
 
 ## License & attribution
 

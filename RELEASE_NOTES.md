@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+## 0.2.2 - 2026-11-17
+
+### Runtime catalog synchronization
+
+- Derive a stable SHA-256 revision from the exact model projection published by
+  `model.static` and `model.for_auth`, covering model IDs, limits, modalities
+  and thinking metadata while excluding executor-only route fields.
+- Use CPA `host.auth.get` and serialized full-file Auth updates to request the
+  existing CPA watcher to refresh the model registry after catalog changes.
+  Preserve unknown Auth fields and retry failed or ambiguous writes on a later
+  refresh without adding per-Auth workers or a second model snapshot.
+- Synchronize initial registration, reconfiguration, stale/fail-closed refresh
+  outcomes and ticker updates while draining the previous generation before a
+  lifecycle switch.
+- Keep Auth callback errors redacted and document the no-CAS limitation of the
+  CPA v8.0.28 full-file save ABI.
+
+### Validation and packaging
+
+- Add offline tests for canonical model revisions, AuthGet/AuthSave behavior,
+  pending retries, filtering, physical-path deduplication and lifecycle sync.
+- Keep the Windows package version aligned at `0.2.2`.
+
 ### Claude tool-result image bridge
 
 - Translate image-bearing Anthropic tool results into the legal Chat
