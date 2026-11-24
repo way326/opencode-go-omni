@@ -336,16 +336,28 @@ jobs:
       - name: Install cross-build tools
         run: |
           sudo apt-get update
-          sudo apt-get install --yes clang lld binutils
+          sudo apt-get install --yes aria2 clang lld binutils
 
       - name: Download verified FreeBSD sysroot
         run: |
           set -euo pipefail
           archive="${RUNNER_TEMP}/freebsd-base.txz"
           sysroot="${RUNNER_TEMP}/freebsd-sysroot"
-          curl --fail --location --retry 3 \
-            "https://archive.freebsd.org/old-releases/amd64/amd64/14.3-RELEASE/base.txz" \
-            --output "${archive}"
+          aria2c \
+            --allow-overwrite=true \
+            --auto-file-renaming=false \
+            --check-integrity=true \
+            --checksum="sha-256=${FREEBSD_BASE_SHA256}" \
+            --connect-timeout=30 \
+            --max-tries=3 \
+            --retry-wait=5 \
+            --timeout=60 \
+            --split=8 \
+            --max-connection-per-server=8 \
+            --file-allocation=none \
+            --dir="${RUNNER_TEMP}" \
+            --out=freebsd-base.txz \
+            "https://archive.freebsd.org/old-releases/amd64/amd64/14.3-RELEASE/base.txz"
           (cd "${RUNNER_TEMP}" && printf '%s  %s\n' "${FREEBSD_BASE_SHA256}" "freebsd-base.txz" | sha256sum -c -)
           mkdir -p "${sysroot}"
           tar -xJf "${archive}" -C "${sysroot}"
