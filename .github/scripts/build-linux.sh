@@ -16,6 +16,7 @@ export GOARCH="${TARGET_GOARCH}"
 
 for enable_script in /opt/rh/devtoolset-*/enable; do
   if [[ -f "${enable_script}" ]]; then
+    export MANPATH="${MANPATH:-}"
     # shellcheck disable=SC1090
     source "${enable_script}"
   fi
