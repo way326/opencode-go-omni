@@ -95,6 +95,12 @@ plugins:
 
 ## Behavior notes
 
+### Catalog discovery
+
+- Decode current catalog display metadata (`name`, `limit`, `modalities`) and protocol metadata (`recommended_api`, `api`) while retaining the legacy flat fields.
+- Resolve routes in this order: user `route-overrides`, explicit known-outage blocks, exact compatibility entries, allowlisted upstream protocol metadata, then family-prefix fallback for metadata-free legacy responses. Unknown protocols and conflicting supported API declarations remain excluded with diagnostics rather than inheriting a possibly wrong family route.
+- Protocol metadata selects only the four supported wire routes and never supplies a URL or endpoint. Catalog visibility establishes routing eligibility, not that every model request will be accepted by the upstream account.
+
 ### Quota
 
 - The standard quota capability queries `GET {base-url}/usage` with the selected credential's Bearer key. The host quota endpoint accepts an `auth_index` - never a browser-supplied key. Reported used percentages are converted to CPA's `remainingFraction` with upstream reset times preserved.

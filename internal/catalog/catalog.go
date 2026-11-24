@@ -3,8 +3,8 @@
 // (FR-002, FR-003, FR-004, FR-010).
 //
 // Route resolution priority follows arch spec §5: user route override >
-// built-in compatibility table > unsupported (excluded from the routable set,
-// kept in diagnostics).
+// built-in compatibility table > upstream protocol metadata > family prefix >
+// unsupported (excluded from the routable set, kept in diagnostics).
 //
 // No scheduling lives here; M3 wires the refresh cadence.
 package catalog
@@ -146,20 +146,36 @@ type HostClient interface {
 	Do(ctx context.Context, req pluginapi.HTTPRequest) (pluginapi.HTTPResponse, error)
 }
 
-// rawModel tolerantly decodes one catalog entry; unknown fields —
-// including protocol/endpoint fields the catalog does not provide and
-// reasoning/tool_calling flags the plugin does not act on — are ignored via
-// json tags. Modality metadata accepts both spellings.
+// rawModel tolerantly decodes one catalog entry. The current OpenCode Go
+// catalog exposes display metadata under name/limit/modalities and protocol
+// metadata under recommended_api/api; the older flat fields remain supported
+// so last-good snapshots and older catalog responses keep decoding.
 type rawModel struct {
-	ID               string       `json:"id"`
-	DisplayName      string       `json:"display_name"`
-	ContextLength    int64        `json:"context_length"`
-	MaxOutputTokens  int64        `json:"max_output_tokens"`
-	InputModes       []string     `json:"input_modes"`
-	OutputModes      []string     `json:"output_modes"`
-	InputModalities  []string     `json:"input_modalities"`
-	OutputModalities []string     `json:"output_modalities"`
-	Thinking         *rawThinking `json:"thinking"`
+	ID               string                     `json:"id"`
+	Name             string                     `json:"name"`
+	DisplayName      string                     `json:"display_name"`
+	ContextLength    int64                      `json:"context_length"`
+	MaxOutputTokens  int64                      `json:"max_output_tokens"`
+	InputModes       []string                   `json:"input_modes"`
+	OutputModes      []string                   `json:"output_modes"`
+	InputModalities  []string                   `json:"input_modalities"`
+	OutputModalities []string                   `json:"output_modalities"`
+	Limit            *rawLimit                  `json:"limit"`
+	Modalities       *rawModalSet               `json:"modalities"`
+	RecommendedAPI   string                     `json:"recommended_api"`
+	API              map[string]json.RawMessage `json:"api"`
+	Thinking         *rawThinking               `json:"thinking"`
+}
+
+type rawLimit struct {
+	Context int64 `json:"context"`
+	Input   int64 `json:"input"`
+	Output  int64 `json:"output"`
+}
+
+type rawModalSet struct {
+	Input  []string `json:"input"`
+	Output []string `json:"output"`
 }
 
 // rawThinking tolerantly decodes the optional per-model thinking object;
@@ -210,6 +226,24 @@ var prefixRoutes = []struct {
 	{"hy", RouteChatCompletions},
 }
 
+// upstreamAPIRoutes is the complete allowlist for protocol metadata accepted
+// from the catalog. Unknown values (for example embeddings, interactions or
+// systemone) stay unsupported; metadata never supplies an endpoint or URL.
+var upstreamAPIRoutes = map[string]Route{
+	"chat-completions": RouteChatCompletions,
+	"messages":         RouteMessages,
+	"responses":        RouteResponses,
+	"generate-content": RouteGemini,
+}
+
+// unavailableModels keeps known upstream outages pinned out of the routable
+// set even when catalog metadata advertises a supported protocol. A user route
+// override still wins, allowing an explicitly verified retry without a code
+// change.
+var unavailableModels = map[string]string{
+	"iceman-contributor-free": "upstream endpoint unavailable (HTTP 503 observed 2026-10-27)",
+}
+
 // omenAlphaNote is the diagnostics line for the one catalog model that upstream
 // protocol metadata does not list. Evidence: the models.dev opencode-go
 // snapshot contains no omen* ID at all, and a read-only probe of the live
@@ -223,8 +257,8 @@ const omenAlphaNote = `model "omen-alpha" routed via compatibility fallback (cha
 // exactRoutes pins models that need an exact route: their documented upstream
 // protocol differs from what their family prefix gives them, or they have no
 // safely supported family prefix at all (arch §5 route priority). The table is
-// consulted after user overrides and before prefixRoutes, so an override still
-// wins and an unknown ID still falls through to the prefix table.
+// consulted after user overrides and before upstream metadata/prefixRoutes, so
+// an override still wins and an unknown ID still falls through safely.
 //
 // Evidence: the models.dev opencode-go snapshot lists qwen3.6-plus and
 // qwen3.7-max with no provider.npm override, so they inherit the provider
@@ -234,6 +268,9 @@ const omenAlphaNote = `model "omen-alpha" routed via compatibility fallback (cha
 // beam-free appears in the 2026-10-17 live catalog and models.dev snapshot;
 // its absent npm override inherits the provider's Chat Completions default.
 // Pin this exact ID rather than assuming a protocol for future beam variants.
+// hungerg-free was added to the live catalog on 2026-11-24 and declares Chat
+// Completions. Keep the exact entry as a fallback if that metadata disappears;
+// newer unseen families are routed from upstream metadata by resolve.
 //
 // iceman-contributor-free is intentionally absent while its upstream endpoint
 // is unavailable (503 observed 2026-10-27). OpenCode's Go documentation and
@@ -245,6 +282,7 @@ var exactRoutes = []struct {
 	note  string
 }{
 	{"beam-free", RouteChatCompletions, ""},
+	{"hungerg-free", RouteChatCompletions, ""},
 	{"qwen3.6-plus", RouteChatCompletions, ""},
 	{"qwen3.7-max", RouteChatCompletions, ""},
 	{"omen-alpha", RouteChatCompletions, omenAlphaNote},
@@ -397,7 +435,11 @@ func (m *Manager) swap(entries []rawModel, extraWarns ...string) {
 			warns = append(warns, d.warn)
 		}
 		if d.route == "" {
-			unsup = append(unsup, UnsupportedModel{UpstreamID: e.ID, Reason: "no route determined"})
+			reason := d.reason
+			if reason == "" {
+				reason = "no route determined"
+			}
+			unsup = append(unsup, UnsupportedModel{UpstreamID: e.ID, Reason: reason})
 			continue
 		}
 		route, endpoint := d.route, d.endpoint
@@ -436,7 +478,24 @@ func (m *Manager) swap(entries []rawModel, extraWarns ...string) {
 		}
 		inputModes := firstNonEmpty(e.InputModes, e.InputModalities)
 		outputModes := firstNonEmpty(e.OutputModes, e.OutputModalities)
-		display := e.DisplayName
+		if e.Modalities != nil {
+			inputModes = firstNonEmpty(e.Modalities.Input, inputModes)
+			outputModes = firstNonEmpty(e.Modalities.Output, outputModes)
+		}
+		contextLength := e.ContextLength
+		outputLimit := e.MaxOutputTokens
+		if e.Limit != nil {
+			if e.Limit.Context > 0 {
+				contextLength = e.Limit.Context
+			}
+			if e.Limit.Output > 0 {
+				outputLimit = e.Limit.Output
+			}
+		}
+		display := e.Name
+		if display == "" {
+			display = e.DisplayName
+		}
 		if display == "" {
 			display = e.ID
 		}
@@ -446,8 +505,8 @@ func (m *Manager) swap(entries []rawModel, extraWarns ...string) {
 			DisplayName:  display,
 			Protocol:     route,
 			EndpointPath: endpoint,
-			ContextLimit: e.ContextLength,
-			OutputLimit:  e.MaxOutputTokens,
+			ContextLimit: contextLength,
+			OutputLimit:  outputLimit,
 			InputModes:   inputModes,
 			OutputModes:  outputModes,
 			Thinking:     normalizeThinking(e.Thinking),
@@ -500,15 +559,17 @@ func (m *Manager) protocolEnabled(r Route) bool {
 // routeDecision is the outcome of resolving one catalog entry (arch §5): route
 // is "" when no priority tier matched, endpoint is the model-scoped path for a
 // route without a static one (Gemini) or the path a user override pinned, and
-// warn is the spec 04 §5 diagnostics line for an applied override.
+// warn is the spec 04 §5 diagnostics line for an applied override. reason
+// explains a metadata-bearing entry that could not be mapped safely.
 type routeDecision struct {
 	route    Route
 	endpoint string
 	warn     string
+	reason   string
 }
 
 // resolve applies route priority strictly (arch §5): user override > exact
-// compatibility table > family prefix table > unsupported.
+// compatibility table > upstream metadata > family prefix table > unsupported.
 func (m *Manager) resolve(e rawModel) routeDecision {
 	if o, ok := m.cfg.RouteOverrides[e.ID]; ok {
 		// Spec 04 §5: an override MUST be visible in diagnostics. Load
@@ -517,7 +578,13 @@ func (m *Manager) resolve(e rawModel) routeDecision {
 		return resolveOverride(e.ID, o)
 	}
 	id := strings.ToLower(e.ID)
+	if reason, blocked := unavailableModels[id]; blocked {
+		return routeDecision{reason: reason}
+	}
 	if d, ok := exactRoute(id); ok {
+		return d
+	}
+	if d, claimed := resolveUpstreamMetadata(e); claimed {
 		return d
 	}
 	for _, p := range prefixRoutes {
@@ -529,6 +596,48 @@ func (m *Manager) resolve(e rawModel) routeDecision {
 		}
 	}
 	return routeDecision{}
+}
+
+// resolveUpstreamMetadata maps the catalog's explicit protocol declaration to
+// one of the four supported wire routes. The bool reports that the entry
+// carried protocol metadata, even when it was unsupported or ambiguous. That
+// distinction prevents a new protocol-only family (for example a decision
+// model under a legacy gpt prefix) from accidentally inheriting a family
+// route. When recommended_api is unsupported, a single supported API entry may
+// still identify the wire route (Gemini currently recommends interactions but
+// exposes generate-content).
+func resolveUpstreamMetadata(e rawModel) (routeDecision, bool) {
+	recommended := strings.ToLower(strings.TrimSpace(e.RecommendedAPI))
+	if recommended == "" && len(e.API) == 0 {
+		return routeDecision{}, false
+	}
+	if route, ok := upstreamAPIRoutes[recommended]; ok {
+		return metadataRouteDecision(e, route), true
+	}
+
+	routes := make(map[Route]struct{})
+	for apiName := range e.API {
+		if route, ok := upstreamAPIRoutes[strings.ToLower(strings.TrimSpace(apiName))]; ok {
+			routes[route] = struct{}{}
+		}
+	}
+	if len(routes) == 1 {
+		for route := range routes {
+			return metadataRouteDecision(e, route), true
+		}
+	}
+	if len(routes) > 1 {
+		return routeDecision{reason: "upstream metadata is ambiguous between supported protocols"}, true
+	}
+	return routeDecision{reason: "upstream metadata advertises no supported protocol"}, true
+}
+
+func metadataRouteDecision(e rawModel, route Route) routeDecision {
+	d := routeDecision{route: route}
+	if route == RouteGemini {
+		d.endpoint = geminiEndpoint(e.ID, geminiActionGenerate)
+	}
+	return d
 }
 
 // resolveOverride turns one validated user override into a decision. The

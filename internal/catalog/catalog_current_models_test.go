@@ -26,6 +26,8 @@ import (
 // read-only GET of /inference/go/v1/models on 2026-10-27: 38 model IDs, each
 // paired with its upstream-declared protocol. One entry is temporarily
 // disabled from routing until its upstream endpoint accepts inference.
+// hungerg-free is appended from the 2026-11-24 catalog response; it is the
+// regression case for a newly added family that previously had no route.
 //
 // Evidence: the live GET supplies membership. Against the archived 2026-10-18
 // 37-ID snapshot, four IDs were added (gemini-4-argon, iceman-contributor-free,
@@ -53,6 +55,7 @@ var currentCatalogModels = []struct {
 	{"gpt-6-luna", RouteResponses},
 	{"grok-4.6", RouteResponses},
 	{"grok-4.7", RouteResponses},
+	{"hungerg-free", RouteChatCompletions},
 	{"hy3", RouteChatCompletions},
 	{"hy4-preview", RouteChatCompletions},
 	{"iceman-contributor-free", RouteChatCompletions},
@@ -129,8 +132,8 @@ func TestCurrentCatalogKnownModelsRouteAsDocumented(t *testing.T) {
 	if len(models) != wantRoutable {
 		t.Fatalf("routable = %d models, want %d", len(models), wantRoutable)
 	}
-	if len(currentCatalogModels) != 38 {
-		t.Fatalf("fixture lists %d IDs, want 38", len(currentCatalogModels))
+	if len(currentCatalogModels) != 39 {
+		t.Fatalf("fixture lists %d IDs, want 39", len(currentCatalogModels))
 	}
 	for _, want := range currentCatalogModels {
 		if _, disabled := temporarilyDisabledCatalogModels[want.id]; disabled {
@@ -162,8 +165,9 @@ func TestCurrentCatalogKnownModelsRouteAsDocumented(t *testing.T) {
 		for _, u := range unsup {
 			if u.UpstreamID == id {
 				found = true
-				if u.Reason != "no route determined" {
-					t.Errorf("%s: reason = %q, want no route determined", id, u.Reason)
+				wantReason := "upstream endpoint unavailable (HTTP 503 observed 2026-10-27)"
+				if u.Reason != wantReason {
+					t.Errorf("%s: reason = %q, want %q", id, u.Reason, wantReason)
 				}
 			}
 		}
@@ -196,9 +200,10 @@ func TestCurrentCatalogProtocolFamiliesCoverEveryRoute(t *testing.T) {
 	}
 }
 
-// TestCurrentCatalogRoutePriority pins the three-tier resolution order
-// (arch §5): a user override beats the exact compatibility table, which beats
-// the family prefix, and an ID no tier claims stays unsupported.
+// TestCurrentCatalogRoutePriority pins the legacy metadata-free resolution
+// order (arch §5): a user override beats the exact compatibility table, which
+// beats the family prefix, and an ID no tier claims stays unsupported. The
+// upstream-metadata tier is covered in catalog_metadata_test.go.
 func TestCurrentCatalogRoutePriority(t *testing.T) {
 	cfg := testCfg()
 	cfg.RouteOverrides = map[string]config.RouteOverride{
@@ -354,14 +359,16 @@ func TestOmenAlphaCompatibilityFallbackDiagnostics(t *testing.T) {
 
 // TestExactCompatibilityTableStaysMinimal pins the exact table to the IDs with
 // a documented reason: the two provider-default qwen IDs, the unlisted
-// omen-alpha fallback, and beam-free. A family prefix must not be used for any
-// of them, and the temporarily disabled iceman entry must stay unrouted.
+// omen-alpha fallback, beam-free, and the new hungerg-free family. A family
+// prefix must not be used for any of them, and the temporarily disabled iceman
+// entry must stay unrouted.
 func TestExactCompatibilityTableStaysMinimal(t *testing.T) {
 	want := map[string]Route{
 		"qwen3.6-plus": RouteChatCompletions,
 		"qwen3.7-max":  RouteChatCompletions,
 		"omen-alpha":   RouteChatCompletions,
 		"beam-free":    RouteChatCompletions,
+		"hungerg-free": RouteChatCompletions,
 	}
 	if len(exactRoutes) != len(want) {
 		t.Fatalf("exactRoutes = %+v, want %d entries", exactRoutes, len(want))
@@ -374,7 +381,7 @@ func TestExactCompatibilityTableStaysMinimal(t *testing.T) {
 		}
 	}
 	for _, p := range prefixRoutes {
-		if p.prefix == "omen" || p.prefix == "beam" || p.prefix == "iceman" {
+		if p.prefix == "omen" || p.prefix == "beam" || p.prefix == "iceman" || p.prefix == "hungerg" {
 			t.Errorf("prefixRoutes contains %q; the supported model is an exact entry", p.prefix)
 		}
 	}

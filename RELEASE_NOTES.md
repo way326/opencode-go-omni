@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Catalog discovery
+
+- Decode the live catalog's `name`, nested `limit`/`modalities`, and `recommended_api`/`api` protocol metadata while preserving older flat fields.
+- Route new model families through an allowlisted mapping to the four supported wire protocols. User overrides and exact compatibility entries retain precedence; family prefixes remain a fallback only when protocol metadata is absent. Unsupported or ambiguous protocols stay excluded with diagnostics.
+- Keep explicitly unavailable models blocked even when their catalog metadata advertises a supported protocol; a user override remains the explicit retry path.
+- Pin `hungerg-free` to Chat Completions as a compatibility fallback and add regression coverage for new-family auto-discovery, exact-route precedence, unsupported decision protocols, ambiguous metadata, and Gemini's `generate-content` fallback.
+- Catalog routing does not establish live inference acceptance for every model or account.
+
 ### Credential secret exposure remediation
 
 - Write new OpenCode Go auth files as reference-only (`type`, `id`, `label`) and
