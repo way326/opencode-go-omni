@@ -20,21 +20,16 @@ func (m *Manager) handleQuotaFetch(request []byte) ([]byte, error) {
 	if err := json.Unmarshal(request, &req); err != nil {
 		return ErrEnvelope("invalid_request", "malformed quota fetch request"), nil
 	}
-	// Only use the credential selected by CPA. Never fall back to the first
-	// configured key: imported auth records need not occur in the plugin config.
-	// Share inference's source precedence and invalid-source rejection rules,
-	// including the metadata shape produced by CPA's generic credential loader.
-	key, _, err := selectedCredentialAPIKey(executorRequest{ExecutorRequest: pluginapi.ExecutorRequest{
-		AuthProvider: req.Provider, AuthAttributes: req.Attributes,
+	// Resolve the selected CPA AuthID exactly for reference credentials. Legacy
+	// imported records retain their own selected api_key compatibility path.
+	binding, _, err := m.selectedCredential(executorRequest{ExecutorRequest: pluginapi.ExecutorRequest{
+		AuthID: req.AuthID, AuthProvider: req.Provider, AuthAttributes: req.Attributes,
 		AuthMetadata: req.Metadata, StorageJSON: req.StorageJSON,
 	}})
 	if err != nil {
 		return ErrEnvelope("invalid_request", err.Error()), nil
 	}
-	m.mu.RLock()
-	baseURL, timeout := m.cfg.BaseURL, m.cfg.RequestTimeout
-	m.mu.RUnlock()
-	usage, err := fetchQuotaWithCallback(context.Background(), m.bridge, baseURL, timeout, key, req.HostCallbackID)
+	usage, err := fetchQuotaWithCallback(context.Background(), m.bridge, binding.cfg.BaseURL, binding.cfg.RequestTimeout, binding.key, req.HostCallbackID)
 	if err != nil {
 		return ErrEnvelope("quota_failure", err.Error()), nil
 	}

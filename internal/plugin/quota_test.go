@@ -37,7 +37,7 @@ func TestManagementRegistration(t *testing.T) {
 func TestQuotaListDoesNotCallHost(t *testing.T) {
 	f := &fakeCaller{}
 	m := NewManager(NewHostBridge(f.call))
-	m.cfg = config.Config{APIKeys: []config.APIKey{{Value: "quota-key-a"}, {Value: "quota-key-b"}}}
+	installQuotaTestConfig(t, m, config.Config{APIKeys: []config.APIKey{{Value: "quota-key-a"}, {Value: "quota-key-b"}}})
 	var got quotaList
 	resp, err := m.HandleManagement(context.Background(), pluginapi.ManagementRequest{Method: http.MethodPost, Path: "/v0/management/plugins/" + pluginName + "/quota-usage", Body: []byte(`{}`)})
 	if err != nil {
@@ -71,7 +71,7 @@ func TestQuotaRefresh(t *testing.T) {
 		return hostOK(pluginapi.HTTPResponse{StatusCode: http.StatusOK, Body: []byte(`{"usage":{"rolling":{"status":"ok","percent":9,"resetsAt":"2026-09-05T12:20:04Z"},"weekly":{"status":"ok","percent":12,"resetsAt":"2026-09-10T00:00:00Z"},"monthly":{"status":"ok","percent":6,"resetsAt":"2026-10-01T00:00:00Z"}}}`)}), nil
 	}}
 	m := NewManager(NewHostBridge(f.call))
-	m.cfg = config.Config{BaseURL: "https://quota.test/v1/", RequestTimeout: config.DefaultRequestTimeout, APIKeys: []config.APIKey{{Value: key}}}
+	installQuotaTestConfig(t, m, config.Config{BaseURL: "https://quota.test/v1/", RequestTimeout: config.DefaultRequestTimeout, APIKeys: []config.APIKey{{Value: key}}})
 	id, _ := quotaIdentity(key)
 	resp, err := m.HandleManagement(context.Background(), pluginapi.ManagementRequest{Method: http.MethodPost, Path: "/v0/management/plugins/" + pluginName + "/quota-usage", Body: []byte(`{"key_id":"` + id + `"}`)})
 	if err != nil {
@@ -90,7 +90,7 @@ func TestQuotaUnknownKeyAndResource(t *testing.T) {
 	const key = "quota-known-secret"
 	f := &fakeCaller{}
 	m := NewManager(NewHostBridge(f.call))
-	m.cfg = config.Config{APIKeys: []config.APIKey{{Value: key}}}
+	installQuotaTestConfig(t, m, config.Config{APIKeys: []config.APIKey{{Value: key}}})
 	unknown := "opencode-go-key-unknown"
 	resp, err := m.HandleManagement(context.Background(), pluginapi.ManagementRequest{Method: http.MethodPost, Path: "/v0/management/plugins/" + pluginName + "/quota-usage", Body: []byte(`{"key_id":"` + unknown + `"}`)})
 	if err != nil || resp.StatusCode != http.StatusNotFound || strings.Contains(string(resp.Body), key) || strings.Contains(string(resp.Body), unknown) || len(f.callsOf(pluginabi.MethodHostHTTPDo)) != 0 {
@@ -131,13 +131,23 @@ func TestQuotaErrorsAreRedacted(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f := &fakeCaller{responder: responder}
 			m := NewManager(NewHostBridge(f.call))
-			m.cfg = config.Config{BaseURL: "https://quota.test/v1", RequestTimeout: config.DefaultRequestTimeout, APIKeys: []config.APIKey{{Value: key}}}
+			installQuotaTestConfig(t, m, config.Config{BaseURL: "https://quota.test/v1", RequestTimeout: config.DefaultRequestTimeout, APIKeys: []config.APIKey{{Value: key}}})
 			resp, err := m.HandleManagement(context.Background(), pluginapi.ManagementRequest{Method: http.MethodPost, Path: "/v0/management/plugins/" + pluginName + "/quota-usage", Body: []byte(`{"key_id":"` + id + `"}`)})
 			if err != nil || resp.StatusCode != http.StatusBadGateway || strings.Contains(string(resp.Body), key) || strings.Contains(string(resp.Body), "upstream body") {
 				t.Fatalf("response = %+v err=%v", resp, err)
 			}
 		})
 	}
+}
+
+func installQuotaTestConfig(t *testing.T, m *Manager, cfg config.Config) {
+	t.Helper()
+	directory, err := buildCredentialDirectory(cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.cfg = cfg
+	m.credentialDirectory = directory
 }
 
 func TestQuotaPageIsStaticAndSecretFree(t *testing.T) {

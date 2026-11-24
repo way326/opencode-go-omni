@@ -282,44 +282,44 @@ func TestManagerSyncsLifecycleAndTickerOnlyWhenRevisionChanges(t *testing.T) {
 	if resp, err := m.HandleCall("plugin.register", lifecycleRequestBody(testValidYAML)); err != nil || !decodeEnv(t, resp).OK {
 		t.Fatalf("register response=%s err=%v", resp, err)
 	}
-	if got := len(host.saves()); got != 1 {
-		t.Fatalf("initial AuthSave calls = %d, want 1", got)
+	if got := len(host.saves()); got != 2 {
+		t.Fatalf("initial AuthSave calls = %d, want migration and catalog revision", got)
 	}
 	if resp, err := m.HandleCall("plugin.reconfigure", lifecycleRequestBody(testValidYAML)); err != nil || !decodeEnv(t, resp).OK {
 		t.Fatalf("same-revision reconfigure response=%s err=%v", resp, err)
 	}
-	if got := len(host.saves()); got != 1 {
-		t.Fatalf("same-revision reconfigure AuthSave calls = %d, want 1", got)
+	if got := len(host.saves()); got != 2 {
+		t.Fatalf("same-revision reconfigure AuthSave calls = %d, want no additional writes", got)
 	}
 	host.setModelsBody([]byte(`{"data":[{"id":"minimax-m3"}]}`))
 	if resp, err := m.HandleCall("plugin.reconfigure", lifecycleRequestBody(testValidYAML)); err != nil || !decodeEnv(t, resp).OK {
 		t.Fatalf("changed-revision reconfigure response=%s err=%v", resp, err)
 	}
-	if got := len(host.saves()); got != 2 {
-		t.Fatalf("changed-revision reconfigure AuthSave calls = %d, want 2", got)
+	if got := len(host.saves()); got != 3 {
+		t.Fatalf("changed-revision reconfigure AuthSave calls = %d, want 3", got)
 	}
 
 	installFastLoop(t, m, testValidYAML)
 	time.Sleep(25 * time.Millisecond)
-	if got := len(host.saves()); got != 2 {
-		t.Fatalf("unchanged ticker AuthSave calls = %d, want 2", got)
+	if got := len(host.saves()); got != 3 {
+		t.Fatalf("unchanged ticker AuthSave calls = %d, want 3", got)
 	}
 	host.setModelsBody([]byte(`{"data":[{"id":"glm-5.3"},{"id":"minimax-m3"}]}`))
 	waitFor(t, "catalog revision sync after ticker change", func() bool {
-		return len(host.saves()) == 3
+		return len(host.saves()) == 4
 	})
 	saves := host.saves()
-	latest := saves[2]
+	latest := saves[3]
 	var object map[string]json.RawMessage
 	if err := json.Unmarshal(latest.JSON, &object); err != nil {
 		t.Fatalf("ticker AuthSave JSON: %v", err)
 	}
 	var previousObject map[string]json.RawMessage
-	if err := json.Unmarshal(saves[1].JSON, &previousObject); err != nil {
+	if err := json.Unmarshal(saves[2].JSON, &previousObject); err != nil {
 		t.Fatalf("previous AuthSave JSON: %v", err)
 	}
 	if len(object[catalogRevisionAuthField]) == 0 || string(object[catalogRevisionAuthField]) == string(previousObject[catalogRevisionAuthField]) {
-		t.Fatalf("ticker did not write a changed revision: previous=%s latest=%s", saves[1].JSON, latest.JSON)
+		t.Fatalf("ticker did not write a changed revision: previous=%s latest=%s", saves[2].JSON, latest.JSON)
 	}
 }
 

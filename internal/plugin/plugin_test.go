@@ -3,8 +3,6 @@ package plugin
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -41,7 +39,7 @@ type fakeCaller struct {
 	mu        sync.Mutex
 	calls     []capturedCall
 	responder func(method string, payload []byte) ([]byte, error)
-	authFiles map[string]struct{}
+	authFiles map[string][]byte
 }
 
 func (f *fakeCaller) call(method string, payload []byte) ([]byte, error) {
@@ -50,6 +48,18 @@ func (f *fakeCaller) call(method string, payload []byte) ([]byte, error) {
 	f.mu.Unlock()
 	var raw []byte
 	var err error
+	if method == pluginabi.MethodHostAuthGet {
+		var req pluginapi.HostAuthGetRequest
+		if json.Unmarshal(payload, &req) == nil {
+			f.mu.Lock()
+			stored, ok := f.authFiles[req.AuthIndex]
+			f.mu.Unlock()
+			if ok {
+				return hostOK(pluginapi.HostAuthGetResponse{AuthIndex: req.AuthIndex, Name: req.AuthIndex, Path: req.AuthIndex, JSON: append([]byte(nil), stored...)}), nil
+			}
+		}
+		return hostErr("not_found", "auth index not found"), nil
+	}
 	if f.responder != nil {
 		raw, err = f.responder(method, payload)
 	} else {
@@ -63,9 +73,9 @@ func (f *fakeCaller) call(method string, payload []byte) ([]byte, error) {
 		if json.Unmarshal(payload, &req) == nil && strings.TrimSpace(req.Name) != "" {
 			f.mu.Lock()
 			if f.authFiles == nil {
-				f.authFiles = make(map[string]struct{})
+				f.authFiles = make(map[string][]byte)
 			}
-			f.authFiles[req.Name] = struct{}{}
+			f.authFiles[req.Name] = append([]byte(nil), req.JSON...)
 			f.mu.Unlock()
 		}
 	}
@@ -93,9 +103,20 @@ func hasExplicitAuthList(raw []byte) bool {
 func (f *fakeCaller) authListResponse() []byte {
 	f.mu.Lock()
 	files := make([]pluginapi.HostAuthFileEntry, 0, len(f.authFiles))
-	for name := range f.authFiles {
+	for name, raw := range f.authFiles {
+		var record struct {
+			Type     string `json:"type"`
+			Provider string `json:"provider"`
+			ID       string `json:"id"`
+		}
+		_ = json.Unmarshal(raw, &record)
+		id := record.ID
+		if id == "" {
+			id = strings.TrimSuffix(name, ".json")
+		}
 		files = append(files, pluginapi.HostAuthFileEntry{
-			ID: strings.TrimSuffix(name, ".json"), Name: name, Source: "file", Path: name,
+			ID: id, Type: record.Type, Provider: record.Provider, AuthIndex: name,
+			Name: name, Source: "file", Path: name,
 		})
 	}
 	f.mu.Unlock()
@@ -530,8 +551,8 @@ func TestLifecycleMaterializesDeterministicAuthRecords(t *testing.T) {
 		t.Fatalf("reconfigure: %v", err)
 	}
 	calls := f.callsOf(pluginabi.MethodHostAuthSave)
-	if len(calls) != 2 {
-		t.Fatalf("unchanged reconfigure auth saves = %d, want 2", len(calls))
+	if len(calls) != 4 {
+		t.Fatalf("unchanged reconfigure auth saves = %d, want 4 (2 materializations + 2 catalog revisions)", len(calls))
 	}
 	seen := map[string]bool{}
 	for _, call := range calls {
@@ -539,52 +560,204 @@ func TestLifecycleMaterializesDeterministicAuthRecords(t *testing.T) {
 		if err := json.Unmarshal(call.payload, &wire); err != nil {
 			t.Fatalf("auth payload: %v", err)
 		}
-		var record struct {
-			Type   string `json:"type"`
-			ID     string `json:"id"`
-			Label  string `json:"label"`
-			APIKey string `json:"api_key"`
-		}
+		var record map[string]json.RawMessage
 		if err := json.Unmarshal(wire.JSON, &record); err != nil {
 			t.Fatalf("auth record: %v", err)
 		}
-		hash := sha256.Sum256([]byte(record.APIKey))
-		wantHash := hex.EncodeToString(hash[:])
-		if record.Type != ProviderID || record.ID != "opencode-go-key-"+wantHash || record.Label != "OpenCode Go credential "+wantHash || wire.Name != record.ID+".json" {
-			t.Fatalf("record identity = %+v name=%q", record, wire.Name)
+		if _, exists := record["api_key"]; exists {
+			t.Fatalf("materialized auth record contains api_key: %s", wire.JSON)
 		}
-		if record.APIKey == "" || strings.Contains(wire.Name, record.APIKey) || strings.Contains(record.ID, record.APIKey) {
-			t.Fatalf("secret leaked in identity: %+v name=%q", record, wire.Name)
+		var typ, id, label string
+		_ = json.Unmarshal(record["type"], &typ)
+		_ = json.Unmarshal(record["id"], &id)
+		_ = json.Unmarshal(record["label"], &label)
+		wantIDs := map[string]bool{config.APIKeyCredentialID(first): true, config.APIKeyCredentialID(second): true}
+		wantLabel := "OpenCode Go credential " + strings.TrimPrefix(id, credentialIDPrefix)[:12]
+		if typ != ProviderID || !wantIDs[id] || label != wantLabel || wire.Name != id+".json" {
+			t.Fatalf("record identity = type=%q id=%q label=%q name=%q", typ, id, label, wire.Name)
 		}
-		seen[record.APIKey] = true
+		seen[id] = true
 	}
 	if len(seen) != 2 {
-		t.Fatalf("materialized keys = %v", seen)
+		t.Fatalf("materialized IDs = %v", seen)
 	}
 	if _, err := m.HandleCall("plugin.reconfigure", lifecycleRequestBody("api-keys:\n  - value: "+first+"\n")); err != nil {
 		t.Fatalf("removed-key reconfigure: %v", err)
 	}
 	// No delete callback exists in the pinned ABI: the old record is stale and
 	// remains in CPA rather than being falsely reported as removed.
-	if len(f.callsOf(pluginabi.MethodHostAuthSave)) != 2 {
-		t.Fatalf("removed-key reconfigure changed save count = %d, want 2", len(f.callsOf(pluginabi.MethodHostAuthSave)))
+	if len(f.callsOf(pluginabi.MethodHostAuthSave)) != 4 {
+		t.Fatalf("removed-key reconfigure changed save count = %d, want 4", len(f.callsOf(pluginabi.MethodHostAuthSave)))
 	}
 	if _, err := m.HandleCall("plugin.reconfigure", lifecycleRequestBody("api-keys:\n  - value: "+first+"\n  - value: "+third+"\n")); err != nil {
 		t.Fatalf("new-key reconfigure: %v", err)
 	}
 	calls = f.callsOf(pluginabi.MethodHostAuthSave)
-	if len(calls) != 3 {
-		t.Fatalf("new-key reconfigure auth saves = %d, want 3", len(calls))
+	if len(calls) != 6 {
+		t.Fatalf("new-key reconfigure auth saves = %d, want 6", len(calls))
 	}
-	var newRecord struct {
-		APIKey string `json:"api_key"`
-	}
+	var newRecord map[string]json.RawMessage
 	var wire pluginapi.HostAuthSaveRequest
-	if err := json.Unmarshal(calls[2].payload, &wire); err != nil {
-		t.Fatalf("new auth wire: %v", err)
+	wantID := config.APIKeyCredentialID(third)
+	foundNew := false
+	for _, call := range calls[4:] {
+		if json.Unmarshal(call.payload, &wire) != nil || wire.Name != wantID+".json" {
+			continue
+		}
+		if err := json.Unmarshal(wire.JSON, &newRecord); err != nil {
+			t.Fatalf("new auth record is invalid: %v", err)
+		}
+		if _, exists := newRecord["api_key"]; exists {
+			t.Fatalf("new auth record contains api_key: %s", wire.JSON)
+		}
+		var newID string
+		_ = json.Unmarshal(newRecord["id"], &newID)
+		if newID != wantID {
+			t.Fatalf("new auth id = %q, want %q", newID, wantID)
+		}
+		foundNew = true
 	}
-	if err := json.Unmarshal(wire.JSON, &newRecord); err != nil || newRecord.APIKey != third {
-		t.Fatalf("new auth record = %+v, want key %q", newRecord, third)
+	if !foundNew {
+		t.Fatalf("no reference-only AuthSave found for %q", wantID)
+	}
+}
+
+func TestLifecycleMigratesOnlyMatchingLegacyAuthAndPreservesUnknownFields(t *testing.T) {
+	id := config.APIKeyCredentialID(testKey)
+	name := id + ".json"
+	legacy := json.RawMessage(`{"type":"opencode-go","id":"` + id + `","label":"Primary","api_key":"` + testKey + `","note":{"owner":"local"},"weight":7,"disabled":false,"proxy_url":"http://proxy.invalid","opencode_go_catalog_revision":"sha256:old"}`)
+	f := &fakeCaller{authFiles: map[string][]byte{name: append([]byte(nil), legacy...)}, responder: catalogResponder(true, testCatalogJSON)}
+	m := NewManager(NewHostBridge(f.call))
+	t.Cleanup(func() { _, _ = m.HandleCall("plugin.shutdown", nil) })
+	resp, err := m.HandleCall("plugin.register", lifecycleRequestBody(testValidYAML))
+	if err != nil || !decodeEnv(t, resp).OK {
+		t.Fatalf("register legacy auth: err=%v envelope=%s", err, resp)
+	}
+	saves := f.callsOf(pluginabi.MethodHostAuthSave)
+	if len(saves) < 1 {
+		t.Fatal("matching legacy auth was not migrated")
+	}
+	for i, call := range saves {
+		var wire pluginapi.HostAuthSaveRequest
+		if err := json.Unmarshal(call.payload, &wire); err != nil {
+			t.Fatalf("save %d payload: %v", i, err)
+		}
+		var record map[string]json.RawMessage
+		if err := json.Unmarshal(wire.JSON, &record); err != nil {
+			t.Fatalf("save %d JSON: %v", i, err)
+		}
+		if _, exists := record["api_key"]; exists {
+			t.Fatalf("save %d reintroduced api_key: %s", i, wire.JSON)
+		}
+		wantFields := map[string]string{
+			"note": `{"owner":"local"}`, "weight": `7`, "disabled": `false`,
+			"proxy_url": `"http://proxy.invalid"`,
+		}
+		for field, wantJSON := range wantFields {
+			var gotValue, wantValue any
+			if len(record[field]) == 0 || json.Unmarshal(record[field], &gotValue) != nil || json.Unmarshal([]byte(wantJSON), &wantValue) != nil || !reflect.DeepEqual(gotValue, wantValue) {
+				t.Fatalf("save %d changed/dropped unknown or host field %q: got=%s want=%s", i, field, record[field], wantJSON)
+			}
+		}
+	}
+	var migrated, synced map[string]json.RawMessage
+	var firstSave, lastSave pluginapi.HostAuthSaveRequest
+	_ = json.Unmarshal(saves[0].payload, &firstSave)
+	_ = json.Unmarshal(saves[len(saves)-1].payload, &lastSave)
+	_ = json.Unmarshal(firstSave.JSON, &migrated)
+	_ = json.Unmarshal(lastSave.JSON, &synced)
+	if string(migrated["opencode_go_catalog_revision"]) != `"sha256:old"` || len(synced["opencode_go_catalog_revision"]) == 0 || string(synced["opencode_go_catalog_revision"]) == `"sha256:old"` {
+		t.Fatal("migration did not preserve the original CPA revision before catalog sync")
+	}
+	if strings.Contains(string(f.authFiles[name]), testKey) {
+		t.Fatal("migrated auth file still contains test key")
+	}
+}
+
+func TestLifecycleRetainsStagedMappingWhenAuthSaveErrorsAfterPersisting(t *testing.T) {
+	const keyA, keyB = "sk-stage-a", "sk-stage-b"
+	var f *fakeCaller
+	f = &fakeCaller{responder: func(method string, payload []byte) ([]byte, error) {
+		if method == pluginabi.MethodHostAuthSave {
+			var request pluginapi.HostAuthSaveRequest
+			if json.Unmarshal(payload, &request) != nil {
+				return hostErr("write_failed", "save failed"), nil
+			}
+			f.mu.Lock()
+			if f.authFiles == nil {
+				f.authFiles = make(map[string][]byte)
+			}
+			f.authFiles[request.Name] = append([]byte(nil), request.JSON...)
+			f.mu.Unlock()
+			return hostErr("write_failed", "save result is ambiguous"), nil
+		}
+		return catalogResponder(true, testCatalogJSON)(method, nil)
+	}}
+	m := NewManager(NewHostBridge(f.call))
+	t.Cleanup(func() { _, _ = m.HandleCall("plugin.shutdown", nil) })
+	resp, err := m.HandleCall("plugin.register", lifecycleRequestBody("api-keys:\n  - value: "+keyA+"\n  - value: "+keyB+"\n"))
+	if err != nil {
+		t.Fatalf("register returned transport error: %v", err)
+	}
+	if env := decodeEnv(t, resp); env.OK || env.Error == nil || env.Error.Code != "auth_materialization_failed" {
+		t.Fatalf("partial save envelope = %+v", env.Error)
+	}
+	idA, idB := config.APIKeyCredentialID(keyA), config.APIKeyCredentialID(keyB)
+	ref := executorRequest{ExecutorRequest: pluginapi.ExecutorRequest{
+		AuthID: idA, AuthProvider: ProviderID,
+		StorageJSON: mustJSON(map[string]string{"type": ProviderID, "id": idA}),
+	}}
+	got, _, lookupErr := m.selectedCredential(ref)
+	if lookupErr != nil || got.key != keyA || got.mgr == nil || len(got.cfg.APIKeys) != 2 {
+		t.Fatalf("persisted staged reference lookup = key-matched=%t mgr=%t keys=%d err=%v", got.key == keyA, got.mgr != nil, len(got.cfg.APIKeys), lookupErr)
+	}
+	ref.AuthID = idB
+	if _, _, err := m.selectedCredential(ref); err == nil || !errors.Is(err, errUnknownCredentialID) {
+		t.Fatalf("unpersisted staged id lookup error = %v", err)
+	}
+	if strings.Contains(string(resp), keyA) || strings.Contains(string(resp), keyB) {
+		t.Fatal("partial AuthSave error envelope leaked a configured key")
+	}
+}
+
+func TestReferenceOnlyExecutionUsesExactAuthIDAndRejectsConflictingLegacyKey(t *testing.T) {
+	m, f := newExecManager(t)
+	id := config.APIKeyCredentialID(testKey)
+	request := executorRequest{ExecutorRequest: pluginapi.ExecutorRequest{
+		AuthID: id, AuthProvider: ProviderID, Model: "opencode-go/glm-5.3", SourceFormat: "openai",
+		OriginalRequest: []byte(ccRequestBody), StorageJSON: mustJSON(map[string]string{"type": ProviderID, "id": id}),
+	}}
+	raw, err := m.HandleCall(pluginabi.MethodExecutorExecute, mustJSON(request))
+	if err != nil || !decodeEnv(t, raw).OK {
+		t.Fatalf("reference-only execution failed: err=%v envelope=%s", err, raw)
+	}
+	calls := f.callsOf(pluginabi.MethodHostHTTPDo)
+	if len(calls) != 2 {
+		t.Fatalf("host HTTP calls = %d, want catalog and inference", len(calls))
+	}
+	var wire hostHTTPReq
+	if json.Unmarshal(calls[1].payload, &wire) != nil || wire.Headers.Get("Authorization") != "Bearer "+testKey {
+		t.Fatal("reference auth did not use the key mapped by its AuthID")
+	}
+
+	request.AuthAttributes = map[string]string{"api_key": "sk-conflicting-legacy-key"}
+	raw, err = m.HandleCall(pluginabi.MethodExecutorExecute, mustJSON(request))
+	env := decodeEnv(t, raw)
+	if err != nil || env.OK || env.Error == nil || !strings.Contains(env.Error.Message, "conflicts with auth id") || strings.Contains(string(raw), testKey) || strings.Contains(string(raw), "sk-conflicting-legacy-key") {
+		t.Fatalf("conflicting legacy key result = %s err=%v", raw, err)
+	}
+	if got := len(f.callsOf(pluginabi.MethodHostHTTPDo)); got != 2 {
+		t.Fatalf("conflicting credential contacted upstream: host HTTP calls=%d", got)
+	}
+	request.AuthID = config.APIKeyCredentialID("sk-not-configured")
+	request.AuthAttributes = map[string]string{"api_key": testKey}
+	raw, err = m.HandleCall(pluginabi.MethodExecutorExecute, mustJSON(request))
+	env = decodeEnv(t, raw)
+	if err != nil || env.OK || env.Error == nil || !strings.Contains(env.Error.Message, "credential id is unknown") || strings.Contains(string(raw), testKey) {
+		t.Fatalf("unknown reference ID result = %s err=%v", raw, err)
+	}
+	if got := len(f.callsOf(pluginabi.MethodHostHTTPDo)); got != 2 {
+		t.Fatalf("unknown reference ID contacted upstream: host HTTP calls=%d", got)
 	}
 }
 
@@ -603,8 +776,8 @@ func TestLifecycleUsesCPAAuthListAfterManagerRestart(t *testing.T) {
 	if _, err := second.HandleCall("plugin.register", lifecycleRequestBody(testValidYAML)); err != nil {
 		t.Fatalf("second register: %v", err)
 	}
-	if got := len(f.callsOf(pluginabi.MethodHostAuthSave)); got != 1 {
-		t.Fatalf("auth saves after manager restart = %d, want 1", got)
+	if got := len(f.callsOf(pluginabi.MethodHostAuthSave)); got != 2 {
+		t.Fatalf("auth saves after manager restart = %d, want materialization and catalog revision", got)
 	}
 }
 
@@ -734,19 +907,24 @@ func TestRefreshFailureStillRegistersAndWarnsWithoutSecrets(t *testing.T) {
 		t.Fatalf("refresh failure must not fail registration (FR-002): %s", resp)
 	}
 	logCalls := f.callsOf(pluginabi.MethodHostLog)
-	if len(logCalls) != 1 {
-		t.Fatalf("warn logs = %d, want 1", len(logCalls))
+	warnCount, refreshWarn, literalWarn := 0, false, false
+	for _, call := range logCalls {
+		var entry map[string]any
+		if err := json.Unmarshal(call.payload, &entry); err != nil {
+			t.Fatalf("log payload: %v", err)
+		}
+		blob := string(call.payload)
+		if strings.Contains(blob, testKey) || strings.Contains(blob, "Bearer") {
+			t.Fatalf("log leaks credential material: %s", blob)
+		}
+		if entry["level"] == "warn" {
+			warnCount++
+			refreshWarn = refreshWarn || strings.Contains(entry["message"].(string), "catalog refresh failed")
+			literalWarn = literalWarn || strings.Contains(entry["message"].(string), "prefer environment references")
+		}
 	}
-	var entry map[string]any
-	if err := json.Unmarshal(logCalls[0].payload, &entry); err != nil {
-		t.Fatalf("log payload: %v", err)
-	}
-	if entry["level"] != "warn" || !strings.Contains(entry["message"].(string), "catalog refresh failed") {
-		t.Fatalf("log entry = %v", entry)
-	}
-	blob := string(logCalls[0].payload)
-	if strings.Contains(blob, testKey) || strings.Contains(blob, "Bearer") {
-		t.Fatalf("log leaks credential material: %s", blob)
+	if warnCount != 2 || !refreshWarn || !literalWarn {
+		t.Fatalf("warning logs = %d, refresh warning present=%t literal warning present=%t; calls=%q", warnCount, refreshWarn, literalWarn, logCalls)
 	}
 	var static pluginapi.ModelResponse
 	decodeResult(t, mustHandle(t, m, "model.static", nil), &static)
@@ -1018,8 +1196,8 @@ func TestOverlappingLifecyclesLeaveSingleTicker(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
-	if got := len(f.callsOf(pluginabi.MethodHostAuthSave)); got != 1 {
-		t.Fatalf("overlapping lifecycle auth saves = %d, want 1", got)
+	if got := len(f.callsOf(pluginabi.MethodHostAuthSave)); got != 2 {
+		t.Fatalf("overlapping lifecycle auth saves = %d, want materialization and catalog revision", got)
 	}
 	done := m.closeStop()
 	if done == nil {

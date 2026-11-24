@@ -1,10 +1,13 @@
 package plugin
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/way326/opencode-go-omni/internal/config"
 )
 
 // keySource identifies which credential slot produced the selected API key.
@@ -17,12 +20,30 @@ const (
 	keySourceStorageJSON    keySource = "storage_json"
 )
 
+const credentialIDPrefix = config.APIKeyCredentialPrefix
+
+// isCanonicalCredentialID recognizes only the ID shape emitted for current
+// config-backed credentials. A malformed value with our prefix must not fall
+// through to the permissive legacy-key path.
+func isCanonicalCredentialID(id string) bool {
+	if !strings.HasPrefix(id, credentialIDPrefix) {
+		return false
+	}
+	suffix := strings.TrimPrefix(id, credentialIDPrefix)
+	if len(suffix) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(suffix)
+	return err == nil
+}
+
 // errSelectedCredentialNoAPIKey is returned when the selected credential
 // carries no usable api_key. It never embeds key material.
 var errSelectedCredentialNoAPIKey = errors.New("selected credential has no api key")
 
-// selectedCredentialAPIKey extracts the api_key of the ONE credential CPA
-// selected for this executor request.
+// selectedCredentialAPIKey extracts api_key material from an explicitly
+// recognized legacy/noncanonical credential. Canonical reference IDs must go
+// through Manager.selectedCredential, which resolves the ID directory first.
 //
 // Source precedence is deterministic:
 //  1. AuthAttributes["api_key"] (immutable routing attributes; historical shape)
@@ -32,8 +53,7 @@ var errSelectedCredentialNoAPIKey = errors.New("selected credential has no api k
 //
 // It intentionally never consults Manager.cfg.APIKeys: falling back to a
 // configured key would silently run the request under a different credential
-// than CPA scheduled (breaking rotation, cooldown, and per-key accounting) and
-// would reintroduce the cross-provider key mixing this path guards against.
+// than CPA scheduled (breaking rotation, cooldown, and per-key accounting).
 // A candidate that is present but blank, wrong-typed, or unparsable is
 // rejected instead of skipped: a malformed higher-priority source is a defect,
 // not a reason to serve a lower-priority key. Cross-provider selections are

@@ -130,6 +130,50 @@ func TestNativeQuotaMetadataCredential(t *testing.T) {
 	decodeResult(t, mustHandle(t, quotaFixtureManager(f), pluginabi.MethodQuotaFetch, body), &result)
 }
 
+func TestNativeQuotaReferenceCredentialUsesExactAuthID(t *testing.T) {
+	const configuredKey = "reference-quota-configured-key"
+	var seen string
+	f := &fakeCaller{responder: func(method string, payload []byte) ([]byte, error) {
+		if method != pluginabi.MethodHostHTTPDo {
+			return hostOK(map[string]any{}), nil
+		}
+		var request hostHTTPReq
+		if json.Unmarshal(payload, &request) != nil {
+			t.Fatal("quota HTTP request is invalid")
+		}
+		seen = request.Headers.Get("Authorization")
+		return hostOK(pluginapi.HTTPResponse{StatusCode: http.StatusOK, Body: []byte(quotaFixture)}), nil
+	}}
+	m := quotaFixtureManager(f)
+	m.cfg.APIKeys = []config.APIKey{{Value: configuredKey}}
+	id := config.APIKeyCredentialID(configuredKey)
+	directory, err := buildCredentialDirectory(m.cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.credentialDirectory = directory
+	referenceJSON := mustJSON(map[string]string{"type": ProviderID, "id": id, "label": "reference"})
+	body, _ := json.Marshal(quotaFetchRequest{QuotaFetchRequest: pluginapi.QuotaFetchRequest{
+		Provider: ProviderID, AuthID: id, StorageJSON: referenceJSON,
+	}})
+	var result pluginapi.QuotaFetchResponse
+	decodeResult(t, mustHandle(t, m, pluginabi.MethodQuotaFetch, body), &result)
+	if seen != "Bearer "+configuredKey || len(result.Groups) != 1 {
+		t.Fatal("reference quota did not resolve the key by selected AuthID")
+	}
+
+	var conflict quotaFetchRequest
+	_ = json.Unmarshal(body, &conflict)
+	conflict.Attributes = map[string]string{"api_key": "different-legacy-key"}
+	conflictBody, _ := json.Marshal(conflict)
+	seen = ""
+	raw := mustHandle(t, m, pluginabi.MethodQuotaFetch, conflictBody)
+	env, decodeErr := decodeEnvelope(raw)
+	if decodeErr != nil || env.OK || env.Error == nil || !strings.Contains(env.Error.Message, "conflicts with auth id") || strings.Contains(string(raw), configuredKey) || seen != "" {
+		t.Fatalf("conflicting reference quota result = %s err=%v seen=%q", raw, decodeErr, seen)
+	}
+}
+
 func TestNativeQuotaConcurrentCredentials(t *testing.T) {
 	arrived := make(chan struct{}, 2)
 	release := make(chan struct{})

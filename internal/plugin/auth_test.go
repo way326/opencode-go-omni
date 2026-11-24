@@ -34,6 +34,40 @@ func TestAuthProviderParseAndRefresh(t *testing.T) {
 	}
 }
 
+func TestAuthProviderParsesReferenceOnlyCredential(t *testing.T) {
+	p := authProvider{}
+	id, _ := quotaIdentity("sk-reference-only-test")
+	raw := mustJSON(map[string]string{"type": ProviderID, "id": id, "label": "Primary"})
+	parsed, err := p.ParseAuth(context.Background(), pluginapi.AuthParseRequest{
+		Provider: ProviderID, FileName: id + ".json", RawJSON: raw,
+	})
+	if err != nil || !parsed.Handled || parsed.Auth.ID != id || len(parsed.Auth.Attributes) != 0 || string(parsed.Auth.StorageJSON) != string(raw) {
+		t.Fatalf("reference-only parse = %#v, err=%v", parsed, err)
+	}
+	refreshed, err := p.RefreshAuth(context.Background(), pluginapi.AuthRefreshRequest{
+		AuthID: id, AuthProvider: ProviderID, StorageJSON: parsed.Auth.StorageJSON,
+	})
+	if err != nil || refreshed.Auth.ID != id || string(refreshed.Auth.StorageJSON) != string(raw) || len(refreshed.Auth.Attributes) != 0 {
+		t.Fatalf("reference-only refresh = %#v, err=%v", refreshed, err)
+	}
+}
+
+func TestAuthProviderRejectsMalformedReferenceAndPresentInvalidKey(t *testing.T) {
+	cases := []string{
+		`{"type":"opencode-go","id":"opencode-go-key-short"}`,
+		`{"type":"opencode-go","id":"opencode-go-key-` + strings.Repeat("g", 64) + `"}`,
+		`{"type":"opencode-go","id":"legacy","api_key":""}`,
+		`{"type":"opencode-go","id":"legacy","api_key":null}`,
+		`{"type":"opencode-go","id":"legacy","api_key":42}`,
+	}
+	for _, raw := range cases {
+		parsed, err := (authProvider{}).ParseAuth(context.Background(), pluginapi.AuthParseRequest{Provider: ProviderID, RawJSON: []byte(raw)})
+		if err == nil || parsed.Handled || strings.Contains(err.Error(), "api_key") && strings.Contains(err.Error(), "42") {
+			t.Fatalf("invalid credential accepted or leaked: parsed=%#v err=%v", parsed, err)
+		}
+	}
+}
+
 func TestAuthProviderAliasesAndFilenameFallback(t *testing.T) {
 	p := authProvider{}
 	parsed, err := p.ParseAuth(context.Background(), pluginapi.AuthParseRequest{
@@ -50,6 +84,17 @@ func TestAuthProviderAliasesAndFilenameFallback(t *testing.T) {
 	})
 	if err != nil || unhandled.Handled {
 		t.Fatalf("unhandled parse = %#v, err=%v", unhandled, err)
+	}
+}
+
+func TestAuthProviderCanonicalFilenameFallbackUsesReferenceID(t *testing.T) {
+	id, _ := quotaIdentity("legacy-filename-key")
+	parsed, err := (authProvider{}).ParseAuth(context.Background(), pluginapi.AuthParseRequest{
+		Provider: ProviderID, FileName: id + ".json",
+		RawJSON: []byte(`{"type":"opencode-go","api_key":"legacy-filename-key"}`),
+	})
+	if err != nil || !parsed.Handled || parsed.Auth.ID != id || parsed.Auth.Attributes["api_key"] != "legacy-filename-key" {
+		t.Fatalf("canonical filename fallback = %#v err=%v", parsed, err)
 	}
 }
 

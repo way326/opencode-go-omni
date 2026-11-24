@@ -2,8 +2,6 @@ package plugin
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -64,6 +62,11 @@ type Manager struct {
 	mu  sync.RWMutex
 	cfg config.Config
 	mgr *catalog.Manager
+	// credentialDirectory maps only active, configured reference IDs. Staged
+	// entries are used only while CPA may already see a file from an in-flight
+	// lifecycle save; each binding carries its matching config/catalog snapshot.
+	credentialDirectory       map[string]credentialBinding
+	stagedCredentialDirectory map[string]credentialBinding
 	// stop/done manage the one background refresh goroutine; both nil
 	// when no loop is running.
 	stop chan struct{}
@@ -119,7 +122,7 @@ func (m *Manager) HandleCall(method string, request []byte) (resp []byte, err er
 		if err != nil {
 			return ErrEnvelope("auth_failure", err.Error()), nil
 		}
-		debugTrace("auth parse response provider=%s id=%s attr_api_key_present=%t storage_json_bytes=%d", resp.Auth.Provider, resp.Auth.ID, strings.TrimSpace(resp.Auth.Attributes["api_key"]) != "", len(resp.Auth.StorageJSON))
+		debugTrace("auth parse response provider=%s id=%s credential_ref_present=%t credential_ref_bytes=%d storage_json_bytes=%d", resp.Auth.Provider, resp.Auth.ID, isCanonicalCredentialID(resp.Auth.ID), len(resp.Auth.ID), len(resp.Auth.StorageJSON))
 		return okEnvelope(resp), nil
 	case pluginabi.MethodAuthLoginStart:
 		var req struct {
@@ -209,7 +212,7 @@ func pluginConfigFields() []pluginapi.ConfigField {
 		{
 			Name:        "api-keys",
 			Type:        pluginapi.ConfigFieldTypeArray,
-			Description: "List of OpenCode Go API keys (`- value: ...`). Supports ${ENV_VAR} expansion.",
+			Description: "List of OpenCode Go API keys (`- value: ...`). Supports ${ENV_VAR}; prefer environment references over literal values.",
 		},
 		{
 			Name:        "base-url",
@@ -359,11 +362,30 @@ func (m *Manager) handleLifecycleAdmitted(request []byte, epoch uint64) ([]byte,
 	if !m.reopenAfterShutdown(epoch) {
 		return ErrEnvelope("plugin_shutting_down", "lifecycle request preceded plugin shutdown"), nil
 	}
+	literalKeys := 0
+	for _, key := range cfg.APIKeys {
+		if key.Source != config.APIKeySourceEnvironment {
+			literalKeys++
+		}
+	}
+	if literalKeys > 0 {
+		if m.bridge != nil {
+			_ = m.bridge.Log("warn", "OpenCode Go API key configuration contains literal or mixed values; prefer environment references", map[string]any{
+				"affected_keys": literalKeys,
+			})
+		} else {
+			debugTrace("lifecycle literal_api_key_warning affected_keys=%d", literalKeys)
+		}
+	}
 	debugTrace("lifecycle config_loaded key_count=%d prefix_enabled=%t prefix=%s", len(cfg.APIKeys), cfg.ModelPrefix.Enabled, cfg.ModelPrefix.Value)
-	ctx, cancel := context.WithTimeout(context.Background(), registerRefreshTimeout)
-	defer cancel()
-	if err := m.materializeAuthRecords(ctx, cfg); err != nil {
-		return ErrEnvelope("auth_materialization_failed", err.Error()), nil
+	var entries []pluginapi.HostAuthFileEntry
+	if m.bridge != nil {
+		listCtx, listCancel := context.WithTimeout(context.Background(), registerRefreshTimeout)
+		entries, err = m.bridge.AuthList(listCtx)
+		listCancel()
+		if err != nil {
+			return ErrEnvelope("auth_materialization_failed", err.Error()), nil
+		}
 	}
 	// A nil *HostBridge must not enter the interface as a typed nil, or
 	// catalog's nil-client guard never fires and Refresh panics inside Do.
@@ -372,6 +394,33 @@ func (m *Manager) handleLifecycleAdmitted(request []byte, epoch uint64) ([]byte,
 		client = m.bridge
 	}
 	mgr := catalog.New(cfg, client)
+	m.mu.RLock()
+	previousMgr := m.mgr
+	m.mu.RUnlock()
+	if cfg.Catalog.StaleWhileUnavailable && previousMgr != nil && len(previousMgr.Models()) > 0 {
+		mgr.SeedFrom(previousMgr)
+	}
+	candidateCredentials, err := buildCredentialDirectory(cfg, mgr)
+	if err != nil {
+		return ErrEnvelope("invalid_config", err.Error()), nil
+	}
+	m.resetStagedCredentialDirectory()
+	if m.authSync != nil {
+		m.authSync.mu.Lock()
+	}
+	saveCtx, saveCancel := context.WithTimeout(context.Background(), registerRefreshTimeout)
+	if err := m.materializeAuthRecordsFromList(saveCtx, cfg, entries, candidateCredentials); err != nil {
+		m.retainOnlyPersistedStagedCredentials(saveCtx)
+		saveCancel()
+		if m.authSync != nil {
+			m.authSync.mu.Unlock()
+		}
+		return ErrEnvelope("auth_materialization_failed", err.Error()), nil
+	}
+	saveCancel()
+	if m.authSync != nil {
+		m.authSync.mu.Unlock()
+	}
 	refreshErr := refreshOnce(context.Background(), mgr, m.bridge, registerRefreshTimeout, cfg)
 	debugTrace("lifecycle refresh_complete model_count=%d refresh_error=%t", len(mgr.Models()), refreshErr != nil)
 
@@ -399,6 +448,8 @@ func (m *Manager) handleLifecycleAdmitted(request []byte, epoch uint64) ([]byte,
 		mgr.SeedFrom(m.mgr)
 	}
 	m.mgr = mgr
+	m.credentialDirectory = candidateCredentials
+	m.stagedCredentialDirectory = nil
 	m.mu.Unlock()
 
 	// Publish the new Manager before asking CPA to re-read auth files: the
@@ -416,62 +467,6 @@ func (m *Manager) handleLifecycleAdmitted(request []byte, epoch uint64) ([]byte,
 
 	m.startRefreshLoop(cfg, mgr, interval, stop, done)
 	return registrationEnvelope(), nil
-}
-
-// materializeAuthRecords makes CPA-visible auth files idempotently. Existing
-// records are discovered through CPA so their host-managed metadata is never
-// overwritten. The full key digest is non-secret and independent of config
-// ordering. The host ABI has no delete/disable callback, so removed keys remain
-// stale records and are not claimed as removed.
-func (m *Manager) materializeAuthRecords(ctx context.Context, cfg config.Config) error {
-	if m.bridge == nil {
-		return nil
-	}
-	entries, err := m.bridge.AuthList(ctx)
-	if err != nil {
-		return fmt.Errorf("list existing auth records: %w", err)
-	}
-	existing := make(map[string]struct{}, len(entries)*2)
-	for _, entry := range entries {
-		if name := strings.TrimSpace(entry.Name); name != "" {
-			existing[name] = struct{}{}
-		}
-		if id := strings.TrimSpace(entry.ID); id != "" {
-			existing[id] = struct{}{}
-		}
-	}
-	for _, key := range cfg.APIKeys {
-		digest := sha256.Sum256([]byte(key.Value))
-		hash := hex.EncodeToString(digest[:])
-		id := "opencode-go-key-" + hash
-		name := id + ".json"
-		if _, ok := existing[id]; ok {
-			continue
-		}
-		if _, ok := existing[name]; ok {
-			continue
-		}
-		record, err := json.Marshal(struct {
-			Type   string `json:"type"`
-			ID     string `json:"id"`
-			Label  string `json:"label"`
-			APIKey string `json:"api_key"`
-		}{
-			Type: "opencode-go", ID: id, Label: "OpenCode Go credential " + hash, APIKey: key.Value,
-		})
-		if err != nil {
-			return fmt.Errorf("build auth record")
-		}
-		if err := m.bridge.AuthSave(ctx, pluginapi.HostAuthSaveRequest{
-			Name: name, JSON: record,
-		}); err != nil {
-			return err
-		}
-		existing[id] = struct{}{}
-		existing[name] = struct{}{}
-		debugTrace("auth materialized id=%s file=%s", id, name)
-	}
-	return nil
 }
 
 // handleModels implements model.static / model.for_auth (FR-003): the last

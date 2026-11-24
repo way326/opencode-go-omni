@@ -9,6 +9,7 @@ plugins:
       enabled: true
       base-url: "https://opencode.ai/inference/go/v1"
       api-keys:
+        # Prefer an environment reference; do not commit or paste literal keys here.
         - value: "${OPENCODE_GO_API_KEY}"
       model-prefix:
         enabled: true

@@ -6,6 +6,7 @@ and serves a deterministic OpenCode Go /usage fixture for the quota provider.
 """
 import base64
 import ctypes as C
+import hashlib
 import json
 import sys
 import threading
@@ -36,7 +37,7 @@ class PluginAPI(C.Structure):
 
 
 def main(path):
-    held, calls, failures = {}, [], []
+    held, calls, failures, auth_saves = {}, [], [], []
     lock = threading.Lock()
     closed = threading.Event()
     emitted = []
@@ -71,6 +72,16 @@ def main(path):
             result = {}
             if method == "host.auth.list":
                 result = {"files": []}
+            elif method == "host.auth.save":
+                auth_json = req.get("json", req.get("JSON"))
+                if isinstance(auth_json, str):
+                    auth_json = json.loads(auth_json)
+                assert isinstance(auth_json, dict), "AuthSave JSON must be an object"
+                assert "api_key" not in auth_json, "new AuthSave payload contains api_key"
+                assert set(auth_json).issubset({"type", "id", "label"}), auth_json
+                assert auth_json.get("type") == "opencode-go", auth_json
+                auth_saves.append(auth_json)
+                result = {"name": req.get("name", req.get("Name", ""))}
             elif method == "host.http.do":
                 if req.get("host_callback_id") == quota_callback:
                     assert req["method"] == "GET", "quota upstream must use GET"
@@ -143,7 +154,11 @@ def main(path):
             plug.free_buffer(output.ptr, output.len)
 
     try:
-        reg = invoke("plugin.register", {"schema_version": 6, "config_yaml": b64("api-keys:\n  - value: " + configured_key + "\n")})
+        config_yaml = "api-keys:\n  - value: " + configured_key + "\n  - value: " + key + "\n"
+        reg = invoke("plugin.register", {"schema_version": 6, "config_yaml": b64(config_yaml)})
+        expected_reference_id = "opencode-go-key-" + hashlib.sha256(key.encode()).hexdigest()
+        assert len(auth_saves) == 2, auth_saves
+        assert expected_reference_id in {record.get("id") for record in auth_saves}, auth_saves
         meta = reg["metadata"]
         assert meta.get("Name", meta.get("name")) == "opencode-go-omni"
         assert reg["schema_version"] == 6
@@ -191,9 +206,17 @@ def main(path):
             quota_request.update(credential)
             assert invoke("quota.fetch", quota_request) == fetched, "quota credential sources differ"
         assert len(quota_seen) == 3, quota_seen
+        reference_auth = {"type": "opencode-go", "id": expected_reference_id, "label": "OpenCode Go credential " + expected_reference_id[-12:]}
+        reference_quota = invoke("quota.fetch", {
+            "provider": "opencode-go", "auth_id": expected_reference_id,
+            "auth_index": "reference-offline", "storage_json": b64(json.dumps(reference_auth)),
+            "host_callback_id": quota_callback,
+        })
+        assert reference_quota == fetched
+        assert len(quota_seen) == 4
         reset = invoke("quota.reset", {"provider": "opencode-go", "auth_id": "auth-offline-quota", "auth_index": "0"}, expect_error=True)
         assert reset.get("code") == "unsupported", reset
-        assert len(quota_seen) == 3, "quota.reset must not call upstream"
+        assert len(quota_seen) == 4, "quota.reset must not call upstream"
         listed = invoke("model.static", {})
         records = listed.get("Models", listed.get("models", []))
         assert len(records) == 4
@@ -207,7 +230,7 @@ def main(path):
         for label, credential in credential_shapes.items():
             closed.clear()
             emitted.clear()
-            request = {"AuthID": "opencode-go-key-selected.json", "AuthProvider": "opencode-go", "Model": "opencode-go/" + model, "SourceFormat": "gemini", "Format": "gemini", "Stream": True, "OriginalRequest": body, "Payload": body, "Headers": {"X-Opencode-Session": ["offline-session-A"]}, "stream_id": "down-offline-" + label, "host_callback_id": "callback-offline"}
+            request = {"AuthID": "auth-offline-selected", "AuthProvider": "opencode-go", "Model": "opencode-go/" + model, "SourceFormat": "gemini", "Format": "gemini", "Stream": True, "OriginalRequest": body, "Payload": body, "Headers": {"X-Opencode-Session": ["offline-session-A"]}, "stream_id": "down-offline-" + label, "host_callback_id": "callback-offline"}
             request.update(credential)
             invoke("executor.execute_stream", request)
             assert closed.wait(15), "DLL stream timed out: " + label
@@ -215,6 +238,12 @@ def main(path):
             assert any(b"thoughtSignature" in chunk for chunk in emitted)
             assert any(b"usageMetadata" in chunk for chunk in emitted)
             stream_chunks += len(emitted)
+        reference_request = {"AuthID": expected_reference_id, "AuthProvider": "opencode-go", "StorageJSON": b64(json.dumps(reference_auth)), "Model": "opencode-go/" + model, "SourceFormat": "gemini", "Format": "gemini", "Stream": True, "OriginalRequest": body, "Payload": body, "Headers": {"X-Opencode-Session": ["offline-session-A"]}, "stream_id": "down-offline-reference", "host_callback_id": "callback-offline"}
+        closed.clear()
+        emitted.clear()
+        invoke("executor.execute_stream", reference_request)
+        assert closed.wait(15), "reference-only DLL stream timed out"
+        assert emitted and all(json.loads(chunk) for chunk in emitted)
         # Exercise the real compiled V2 normalizer through C ABI and a fake host.
         v2_body = b64(json.dumps({"input": [{"type": "agent_message", "author": "/root", "recipient": "/root/abi-worker", "content": [{"type": "input_text", "text": "Message Type: NEW_TASK\nPayload:\n"}, {"type": "encrypted_content", "encrypted_content": "V2-ABI-TASK-391"}]}]}))
         closed.clear()
@@ -236,7 +265,7 @@ def main(path):
         assert calls.count("host.http.do_stream") == upstream_calls, "missing credential contacted upstream"
         assert key not in json.dumps(missing_error) and configured_key not in json.dumps(missing_error)
         assert not failures, failures
-        print(json.dumps({"abi": 1, "schema": 6, "catalog_models": len(records), "advertises_oauth": capabilities["auth_provider"], "credential_shapes": list(credential_shapes), "selected_key_differs_from_config": key != configured_key, "quota_buckets": len(buckets), "quota_credential_shapes": 3, "v2_tasks_seen": len(v2_seen), "v2_opaque_rejected": True, "stream_chunks": stream_chunks, "host_calls": len(calls), "network_requests": 0, "listeners_started": 0, "result": "PASS"}))
+        print(json.dumps({"abi": 1, "schema": 6, "catalog_models": len(records), "advertises_oauth": capabilities["auth_provider"], "credential_shapes": list(credential_shapes) + ["reference_only"], "reference_auth_saves": len(auth_saves), "selected_key_differs_from_config_sibling": key != configured_key, "quota_buckets": len(buckets), "quota_credential_shapes": 4, "v2_tasks_seen": len(v2_seen), "v2_opaque_rejected": True, "stream_chunks": stream_chunks, "host_calls": len(calls), "network_requests": 0, "listeners_started": 0, "result": "PASS"}))
     finally:
         plug.shutdown()
     assert not held, "host callback buffers leaked"

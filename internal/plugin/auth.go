@@ -18,11 +18,11 @@ func (authProvider) Identifier() string { return ProviderID }
 func (authProvider) ParseAuth(_ context.Context, req pluginapi.AuthParseRequest) (pluginapi.AuthParseResponse, error) {
 	debugTrace("auth parse request provider=%s file=%s raw_bytes=%d", req.Provider, req.FileName, len(req.RawJSON))
 	var raw struct {
-		Type     string `json:"type"`
-		Provider string `json:"provider"`
-		ID       string `json:"id"`
-		Label    string `json:"label"`
-		APIKey   string `json:"api_key"`
+		Type     string          `json:"type"`
+		Provider string          `json:"provider"`
+		ID       string          `json:"id"`
+		Label    string          `json:"label"`
+		APIKey   json.RawMessage `json:"api_key"`
 	}
 	if err := json.Unmarshal(req.RawJSON, &raw); err != nil {
 		if req.Provider == ProviderID {
@@ -33,16 +33,34 @@ func (authProvider) ParseAuth(_ context.Context, req pluginapi.AuthParseRequest)
 	if (req.Provider != "" && req.Provider != ProviderID) || (raw.Type != ProviderID && raw.Provider != ProviderID) {
 		return pluginapi.AuthParseResponse{Handled: false}, nil
 	}
-	if strings.TrimSpace(raw.APIKey) == "" {
-		return pluginapi.AuthParseResponse{}, fmt.Errorf("opencode-go auth record has no api key")
-	}
 	if raw.ID == "" {
 		raw.ID = req.FileName
+		if strings.HasSuffix(raw.ID, ".json") {
+			fileID := strings.TrimSuffix(raw.ID, ".json")
+			if isCanonicalCredentialID(fileID) {
+				raw.ID = fileID
+			}
+		}
 	}
-	debugTrace("auth parse handled provider=%s file=%s id=%s api_key_present=%t api_key_length=%d", req.Provider, req.FileName, raw.ID, strings.TrimSpace(raw.APIKey) != "", len(raw.APIKey))
+	if strings.HasPrefix(raw.ID, credentialIDPrefix) && !isCanonicalCredentialID(raw.ID) {
+		return pluginapi.AuthParseResponse{}, fmt.Errorf("opencode-go auth record has invalid credential id")
+	}
+	attributes := map[string]string(nil)
+	if len(raw.APIKey) == 0 {
+		if !isCanonicalCredentialID(raw.ID) {
+			return pluginapi.AuthParseResponse{}, fmt.Errorf("opencode-go reference auth record has invalid credential id")
+		}
+	} else {
+		var apiKey string
+		if json.Unmarshal(raw.APIKey, &apiKey) != nil || strings.TrimSpace(apiKey) == "" {
+			return pluginapi.AuthParseResponse{}, fmt.Errorf("opencode-go auth record has invalid api key")
+		}
+		attributes = map[string]string{"api_key": apiKey}
+	}
+	debugTrace("auth parse handled provider=%s file=%s id=%s credential_ref_present=%t credential_ref_bytes=%d", req.Provider, req.FileName, raw.ID, isCanonicalCredentialID(raw.ID), len(raw.ID))
 	return pluginapi.AuthParseResponse{Handled: true, Auth: pluginapi.AuthData{
 		Provider: ProviderID, ID: raw.ID, FileName: req.FileName, Label: raw.Label, StorageJSON: req.RawJSON,
-		Attributes: map[string]string{"api_key": raw.APIKey},
+		Attributes: attributes,
 	}}, nil
 }
 

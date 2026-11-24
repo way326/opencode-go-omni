@@ -3,6 +3,8 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/url"
 	"os"
@@ -43,8 +45,46 @@ type ModelPrefix struct {
 	Value   string
 }
 
+// APIKeySource is a non-secret classification of how an API key value was
+// loaded. SourceMixed deliberately records no source text because composite
+// config values may contain literal key material.
+type APIKeySource string
+
+const (
+	APIKeySourceLiteral     APIKeySource = "literal"
+	APIKeySourceEnvironment APIKeySource = "environment"
+	APIKeySourceMixed       APIKeySource = "mixed"
+
+	// APIKeyCredentialPrefix is shared with the plugin's materialized auth IDs.
+	APIKeyCredentialPrefix = "opencode-go-key-"
+)
+
 type APIKey struct {
-	Value string
+	// Value is the resolved runtime key. It must never be serialized or logged.
+	Value string `json:"-" yaml:"-"`
+	// Source and Ref are safe diagnostics. Ref is populated only when the
+	// entire configured value is exactly ${ENV_VAR}; mixed values retain no text.
+	Source       APIKeySource `json:"source" yaml:"-"`
+	Ref          string       `json:"ref,omitempty" yaml:"-"`
+	CredentialID string       `json:"credential_id" yaml:"-"`
+}
+
+// APIKeyCredentialID returns the stable, non-secret fingerprint used by auth
+// records and quota cards. It hashes exactly the resolved value bytes, matching
+// materializeAuthRecords and quotaIdentity; it does not trim the value.
+func APIKeyCredentialID(value string) string {
+	digest := sha256.Sum256([]byte(value))
+	return APIKeyCredentialPrefix + hex.EncodeToString(digest[:])
+}
+
+// String keeps diagnostic formatting from printing Value.
+func (k APIKey) String() string {
+	return fmt.Sprintf("{Value:<redacted> Source:%s Ref:%s CredentialID:%s}", k.Source, k.Ref, k.CredentialID)
+}
+
+// GoString keeps %#v diagnostics from printing Value.
+func (k APIKey) GoString() string {
+	return fmt.Sprintf("config.APIKey{Value:<redacted> Source:%q Ref:%q CredentialID:%q}", k.Source, k.Ref, k.CredentialID)
 }
 
 type Catalog struct {
@@ -137,7 +177,7 @@ func Load(yamlBytes []byte) (Config, error) {
 	}
 	keys := make([]APIKey, len(raw.APIKeys))
 	for i, k := range raw.APIKeys {
-		keys[i] = APIKey{Value: os.ExpandEnv(k.Value)}
+		keys[i] = loadAPIKey(k.Value)
 	}
 	refreshInterval, err := parseDuration("catalog.refresh-interval", raw.Catalog.RefreshInterval, DefaultRefreshInterval)
 	if err != nil {
@@ -185,6 +225,54 @@ func Load(yamlBytes []byte) (Config, error) {
 	return c, nil
 }
 
+// loadAPIKey preserves os.ExpandEnv semantics while recording only safe
+// provenance. A pure ${NAME} reference stores NAME; mixed values store no
+// source text because that text could contain literal secret material.
+func loadAPIKey(configured string) APIKey {
+	referenced := false
+	value := os.Expand(configured, func(name string) string {
+		referenced = true
+		return os.Getenv(name)
+	})
+	key := APIKey{Value: value, Source: APIKeySourceLiteral, CredentialID: APIKeyCredentialID(value)}
+	if name, ok := pureEnvReference(configured); ok {
+		key.Source = APIKeySourceEnvironment
+		key.Ref = name
+	} else if referenced {
+		key.Source = APIKeySourceMixed
+	}
+	return key
+}
+
+// pureEnvReference accepts only the documented ${NAME} form. Alternate shell
+// expansion syntax and composite values are intentionally not retained.
+func pureEnvReference(raw string) (string, bool) {
+	if len(raw) < 4 || !strings.HasPrefix(raw, "${") || !strings.HasSuffix(raw, "}") {
+		return "", false
+	}
+	name := raw[2 : len(raw)-1]
+	if !validEnvName(name) {
+		return "", false
+	}
+	return name, true
+}
+
+func validEnvName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i, r := range name {
+		letter := r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r == '_'
+		if i == 0 && !letter {
+			return false
+		}
+		if !letter && !(r >= '0' && r <= '9') {
+			return false
+		}
+	}
+	return true
+}
+
 // PublicID returns the client-facing model ID (FR-003).
 func PublicID(c Config, upstreamID string) string {
 	if c.ModelPrefix.Enabled {
@@ -203,17 +291,39 @@ func (c Config) validate() error {
 	if len(c.APIKeys) == 0 {
 		return fmt.Errorf("api-keys: at least one key is required")
 	}
+	seenValues := make(map[string]bool, len(c.APIKeys))
+	seenEffectiveValues := make(map[string]bool, len(c.APIKeys))
+	seenIDs := make(map[string]bool, len(c.APIKeys))
 	for i, k := range c.APIKeys {
-		if k.Value == "" {
+		if strings.TrimSpace(k.Value) == "" {
 			return fmt.Errorf("api-keys[%d].value: expanded to empty", i)
 		}
-	}
-	seen := make(map[string]bool, len(c.APIKeys))
-	for _, k := range c.APIKeys {
-		if seen[k.Value] {
+		if seenValues[k.Value] {
 			return fmt.Errorf("api-keys: duplicate key values are not allowed")
 		}
-		seen[k.Value] = true
+		seenValues[k.Value] = true
+		effectiveValue := strings.TrimSpace(k.Value)
+		if seenEffectiveValues[effectiveValue] {
+			return fmt.Errorf("api-keys: duplicate key values after whitespace normalization are not allowed")
+		}
+		seenEffectiveValues[effectiveValue] = true
+
+		expectedID := APIKeyCredentialID(k.Value)
+		if k.CredentialID != "" && k.CredentialID != expectedID {
+			return fmt.Errorf("api-keys[%d].credential_id: does not match resolved value", i)
+		}
+		credentialID := k.CredentialID
+		if credentialID == "" {
+			credentialID = expectedID
+		}
+		if seenIDs[credentialID] {
+			return fmt.Errorf("api-keys: duplicate credential ids are not allowed")
+		}
+		seenIDs[credentialID] = true
+
+		if err := validateAPIKeySource(i, k); err != nil {
+			return err
+		}
 	}
 	if c.Catalog.RefreshInterval < time.Minute {
 		return fmt.Errorf("catalog.refresh-interval: must be at least 1m")
@@ -246,6 +356,26 @@ func (c Config) validate() error {
 	}
 	if c.ModelPrefix.Enabled && !validPrefix(c.ModelPrefix.Value) {
 		return fmt.Errorf("model-prefix.value: invalid provider-ID characters %q", c.ModelPrefix.Value)
+	}
+	return nil
+}
+
+func validateAPIKeySource(index int, key APIKey) error {
+	switch key.Source {
+	case "":
+		if key.Ref != "" {
+			return fmt.Errorf("api-keys[%d].ref: requires a credential source", index)
+		}
+	case APIKeySourceLiteral, APIKeySourceMixed:
+		if key.Ref != "" {
+			return fmt.Errorf("api-keys[%d].ref: only valid for an environment reference", index)
+		}
+	case APIKeySourceEnvironment:
+		if !validEnvName(key.Ref) {
+			return fmt.Errorf("api-keys[%d].ref: invalid environment variable name", index)
+		}
+	default:
+		return fmt.Errorf("api-keys[%d].source: unsupported credential source", index)
 	}
 	return nil
 }

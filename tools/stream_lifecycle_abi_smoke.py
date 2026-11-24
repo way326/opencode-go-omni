@@ -398,7 +398,7 @@ class FakeHost:
 
 def stream_request(case):
     return {
-        "AuthID": "opencode-go-lifecycle-selected.json",
+        "AuthID": "auth-lifecycle-selected",
         "AuthProvider": "opencode-go",
         "AuthAttributes": {"api_key": SELECTED_KEY},
         "Model": PUBLIC_MODEL,

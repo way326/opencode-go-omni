@@ -77,7 +77,7 @@ plugins:
 | Key | Notes |
 | --- | --- |
 | `base-url` | Upstream OpenCode Go API base. |
-| `api-keys` | One or more subscription keys; pooled by CPA's scheduler. |
+| `api-keys` | One or more subscription keys; pooled by CPA's scheduler. Prefer `value: "${OPENCODE_GO_API_KEY}"` so the literal is not stored in CPA YAML. |
 | `model-prefix` | Public model IDs are prefixed so clients see `opencode-go/...`. |
 | `protocols.*` | Enable or disable individual upstream routes. |
 | `catalog.refresh-interval` / `catalog.stale-while-unavailable` | Catalog refresh period; keep the last-good catalog while upstream is unavailable. |
@@ -88,7 +88,9 @@ plugins:
 ## Authentication & credentials
 
 - API keys are configured under `plugins.configs.opencode-go-omni.api-keys`. The plugin intentionally does **not** register a browser OAuth login (no combined `AuthProvider` capability and no login card).
-- CPA's file credential loader continues to load plugin-generated files containing `"type": "opencode-go"`. The executor reads only the credential selected by CPA, in order: historical `AuthAttributes.api_key`, then `AuthMetadata.api_key`, then the raw `StorageJSON` field. A present-but-invalid source is rejected - the executor never silently substitutes the first configured key.
+- New plugin auth files contain only `type`, `id`, and `label`; they do not store `api_key`. For canonical `opencode-go-key-<sha256>` IDs, execution and standard quota resolve the exact selected AuthID from the active plugin config. Legacy `api_key` fields are only consistency checks for these IDs; mismatches fail closed. Noncanonical imported legacy IDs retain the old precedence (`AuthAttributes.api_key`, `AuthMetadata.api_key`, then `StorageJSON`) and never fall back to another configured key.
+- The SHA-256 ID is a stable fingerprint, not a random opaque identifier: someone with candidate key values can verify them offline, and identical keys are linkable across installations. This tradeoff preserves deterministic auth filenames; use an HMAC/random-ID design instead if that is outside your threat model.
+- Prefer environment references such as `value: "${OPENCODE_GO_API_KEY}"`. Literal keys remain supported for compatibility, but may be exposed through local configuration views. If a key has already been exposed, rotate/revoke it upstream; moving it to an environment variable or hiding a UI preview does not invalidate existing copies.
 - Legacy files imported with only `"provider": "opencode-go"` and no `"type"` should be backed up and given `"type": "opencode-go"` before adoption.
 
 ## Behavior notes

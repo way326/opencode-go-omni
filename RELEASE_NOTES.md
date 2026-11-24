@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Credential secret exposure remediation
+
+- Write new OpenCode Go auth files as reference-only (`type`, `id`, `label`) and
+  resolve canonical selected AuthIDs against an immutable credential directory;
+  conflicting legacy key fields and unknown IDs fail closed.
+- Migrate only verified matching legacy auth files, preserving unknown/CPA
+  metadata and verifying the saved file by reading it back. Existing plaintext
+  files that no longer match the configured key remain for management-side
+  cleanup rather than being silently rewritten or deleted.
+- Treat SHA-256 AuthIDs as stable fingerprints (offline candidate checks and
+  cross-installation linkability are possible), not as random opaque IDs. Prefer
+  environment-variable references and rotate/revoke keys that have already
+  been exposed; UI redaction alone does not revoke a credential.
+- Confirm SDK/Core compatibility and exercise the installed CPA ABI before
+  treating the change as runtime-verified. Management Center preview/copy
+  redaction is a companion frontend change and does not protect raw downloads.
+
 ## 0.2.2 - 2026-11-17
 
 ### Runtime catalog synchronization

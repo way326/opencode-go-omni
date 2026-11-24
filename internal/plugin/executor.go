@@ -147,13 +147,10 @@ func executionStreamConverter(res *resolvedExecution, format string) streamConve
 // extracts the key selected by CPA. A non-nil second return is a ready-made
 // failure envelope.
 func (m *Manager) resolveExecution(req executorRequest) (*resolvedExecution, []byte) {
-	m.mu.RLock()
-	cfg, mgr := m.cfg, m.mgr
-	m.mu.RUnlock()
 	if req.AuthProvider != ProviderID {
 		return nil, classEnvelope(&errclass.Error{Class: errclass.ClassAuth, Message: "selected auth provider is not opencode-go"})
 	}
-	key, source, keyErr := selectedCredentialAPIKey(req)
+	binding, source, keyErr := m.selectedCredential(req)
 	if keyErr != nil {
 		message := keyErr.Error()
 		if errors.Is(keyErr, errSelectedCredentialNoAPIKey) {
@@ -162,6 +159,7 @@ func (m *Manager) resolveExecution(req executorRequest) (*resolvedExecution, []b
 		debugTrace("executor auth model=%s auth_id=%s provider=%s key_source=%s key_error=%v", req.Model, req.AuthID, req.AuthProvider, source, keyErr)
 		return nil, classEnvelope(&errclass.Error{Class: errclass.ClassAuth, Message: message})
 	}
+	cfg, mgr := binding.cfg, binding.mgr
 	debugTrace("executor auth model=%s auth_id=%s provider=%s key_source=%s attr_count=%d storage_json_bytes=%d", req.Model, req.AuthID, req.AuthProvider, source, len(req.AuthAttributes), len(req.StorageJSON))
 	var rec catalog.ModelRecord
 	var found bool
@@ -175,7 +173,7 @@ func (m *Manager) resolveExecution(req executorRequest) (*resolvedExecution, []b
 			StatusCode: http.StatusNotFound,
 		})
 	}
-	return &resolvedExecution{cfg: cfg, rec: rec, key: key, tools: *shared.NewResponseTools(), clientModel: req.Model, callbackID: req.HostCallbackID}, nil
+	return &resolvedExecution{cfg: cfg, rec: rec, key: binding.key, tools: *shared.NewResponseTools(), clientModel: req.Model, callbackID: req.HostCallbackID}, nil
 }
 
 // handleExecute implements executor.execute (non-stream). Stream-flagged

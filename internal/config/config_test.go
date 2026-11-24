@@ -1,6 +1,8 @@
 package config
 
 import (
+	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -135,6 +137,160 @@ func TestLoadEnvExpansion(t *testing.T) {
 	}
 	if len(c.APIKeys) != 1 || c.APIKeys[0].Value != "expanded-secret" {
 		t.Fatalf("APIKeys = %+v", c.APIKeys)
+	}
+	if c.APIKeys[0].Source != APIKeySourceEnvironment || c.APIKeys[0].Ref != "TEST_OG_KEY" {
+		t.Fatalf("environment source metadata = %+v", c.APIKeys[0])
+	}
+}
+
+func TestLoadRejectsWhitespaceOnlyAPIKeyWithoutEcho(t *testing.T) {
+	_, err := Load([]byte("api-keys:\n  - value: \" \\t  \"\n"))
+	if err == nil || err.Error() != "api-keys[0].value: expanded to empty" {
+		t.Fatalf("whitespace-only API key error = %v", err)
+	}
+}
+
+func TestLoadRejectsKeysThatNormalizeToTheSameExecutionValue(t *testing.T) {
+	_, err := Load([]byte("api-keys:\n  - value: api-key\n  - value: ' api-key '\n"))
+	if err == nil || err.Error() != "api-keys: duplicate key values after whitespace normalization are not allowed" {
+		t.Fatalf("normalized duplicate error = %v", err)
+	}
+}
+
+func TestAPIKeyMetadataAndCredentialID(t *testing.T) {
+	t.Setenv("TEST_OG_ENV_KEY", "expanded-secret")
+	doc := "api-keys:\n  - value: sk-dummy\n  - value: ${TEST_OG_ENV_KEY}\n"
+	c, err := Load([]byte(doc))
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if len(c.APIKeys) != 2 {
+		t.Fatalf("APIKeys length = %d, want 2", len(c.APIKeys))
+	}
+	literal, env := c.APIKeys[0], c.APIKeys[1]
+	if literal.Source != APIKeySourceLiteral || literal.Ref != "" {
+		t.Fatalf("literal source metadata = %+v", literal)
+	}
+	if got, want := literal.CredentialID, "opencode-go-key-1eaa840f0577b0dbef7d091e41827c315610880057abaffd31736cac13356010"; got != want {
+		t.Fatalf("literal credential ID = %q, want %q", got, want)
+	}
+	if env.Source != APIKeySourceEnvironment || env.Ref != "TEST_OG_ENV_KEY" {
+		t.Fatalf("environment source metadata = %+v", env)
+	}
+	if got, want := env.CredentialID, "opencode-go-key-e97dffda87a118344e253cb4d25ef3e0df682d786e6c5461469c396cdc5237a6"; got != want {
+		t.Fatalf("environment credential ID = %q, want %q", got, want)
+	}
+	if got, want := env.CredentialID, APIKeyCredentialID(env.Value); got != want {
+		t.Fatalf("credential ID helper mismatch: got %q, want %q", got, want)
+	}
+}
+
+func TestAPIKeyMixedSourceRetainsNoConfiguredText(t *testing.T) {
+	t.Setenv("TEST_OG_MIX_A", "alpha")
+	t.Setenv("TEST_OG_MIX_B", "beta")
+	const literalSegment = "prefix-route-secret-"
+	doc := "api-keys:\n  - value: " + literalSegment + "${TEST_OG_MIX_A}-${TEST_OG_MIX_B}\n"
+	c, err := Load([]byte(doc))
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	key := c.APIKeys[0]
+	if key.Value != literalSegment+"alpha-beta" {
+		t.Fatalf("expanded value = %q", key.Value)
+	}
+	if key.Source != APIKeySourceMixed || key.Ref != "" {
+		t.Fatalf("mixed source metadata = %+v", key)
+	}
+	formatted := key.String()
+	if strings.Contains(formatted, key.Value) || strings.Contains(formatted, "alpha") || strings.Contains(formatted, "route-secret") || strings.Contains(formatted, "TEST_OG_MIX") {
+		t.Fatalf("formatted APIKey leaked source material: %q", formatted)
+	}
+}
+
+func TestPureEnvReferenceOnlyRetainsVariableName(t *testing.T) {
+	tests := []struct {
+		raw  string
+		name string
+		ok   bool
+	}{
+		{"${TEST_OG_NAME}", "TEST_OG_NAME", true},
+		{"${_TEST_OG_NAME2}", "_TEST_OG_NAME2", true},
+		{"${}", "", false},
+		{"${1BAD}", "", false},
+		{"prefix-${TEST_OG_NAME}", "", false},
+		{"${TEST_OG_NAME}${OTHER}", "", false},
+		{"$TEST_OG_NAME", "", false},
+		{"${TEST_OG_NAME:-fallback}", "", false},
+		{"literal", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.raw, func(t *testing.T) {
+			name, ok := pureEnvReference(tt.raw)
+			if name != tt.name || ok != tt.ok {
+				t.Fatalf("pureEnvReference(%q) = (%q, %t), want (%q, %t)", tt.raw, name, ok, tt.name, tt.ok)
+			}
+		})
+	}
+}
+
+func TestAPIKeyNeverSerializesOrFormatsResolvedValue(t *testing.T) {
+	t.Setenv("TEST_OG_SERIALIZE_KEY", "serialized-secret")
+	c, err := Load([]byte("api-keys:\n  - value: ${TEST_OG_SERIALIZE_KEY}\n"))
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	raw, err := json.Marshal(c.APIKeys)
+	if err != nil {
+		t.Fatalf("json.Marshal failed: %v", err)
+	}
+	formatted := fmt.Sprintf("value=%v plus=%+v direct=%#v slice=%+v", c.APIKeys[0], c.APIKeys[0], c.APIKeys[0], c.APIKeys)
+	for label, text := range map[string]string{"json": string(raw), "format": formatted} {
+		if strings.Contains(text, "serialized-secret") {
+			t.Fatalf("%s leaked resolved key: %q", label, text)
+		}
+	}
+	if !strings.Contains(string(raw), `"credential_id":"opencode-go-key-`) {
+		t.Fatalf("JSON lacks non-secret credential ID: %s", raw)
+	}
+}
+
+func TestCredentialIDUsesExactResolvedBytes(t *testing.T) {
+	if got, want := APIKeyCredentialID("alpha"), "opencode-go-key-8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8"; got != want {
+		t.Fatalf("APIKeyCredentialID(alpha) = %q, want %q", got, want)
+	}
+	if APIKeyCredentialID("alpha") == APIKeyCredentialID(" alpha ") {
+		t.Fatal("credential ID incorrectly trims resolved bytes")
+	}
+	if APIKeyCredentialID("alpha") == APIKeyCredentialID("beta") {
+		t.Fatal("different values produced the same credential ID")
+	}
+}
+
+func TestValidateAPIKeyCredentialMetadata(t *testing.T) {
+	c, err := Load([]byte("api-keys:\n  - value: alpha\n"))
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+
+	wrongID := c
+	wrongID.APIKeys = append([]APIKey(nil), c.APIKeys...)
+	wrongID.APIKeys[0].CredentialID = APIKeyCredentialID("different-value")
+	if err := wrongID.validate(); err == nil || !strings.Contains(err.Error(), "credential_id: does not match resolved value") {
+		t.Fatalf("wrong credential ID error = %v", err)
+	}
+
+	badRef := c
+	badRef.APIKeys = append([]APIKey(nil), c.APIKeys...)
+	badRef.APIKeys[0].Ref = "SHOULD_NOT_BE_STORED"
+	if err := badRef.validate(); err == nil || !strings.Contains(err.Error(), "ref: only valid for an environment reference") {
+		t.Fatalf("literal ref error = %v", err)
+	}
+
+	badSource := c
+	badSource.APIKeys = append([]APIKey(nil), c.APIKeys...)
+	badSource.APIKeys[0].Source = APIKeySource("raw")
+	if err := badSource.validate(); err == nil || !strings.Contains(err.Error(), "source: unsupported credential source") {
+		t.Fatalf("unsupported source error = %v", err)
 	}
 }
 

@@ -2,8 +2,6 @@ package plugin
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -54,9 +52,9 @@ type quotaUpstreamWindow struct {
 }
 
 func quotaIdentity(key string) (id, label string) {
-	digest := sha256.Sum256([]byte(key))
-	hash := hex.EncodeToString(digest[:])
-	return "opencode-go-key-" + hash, "OpenCode Go credential " + hash[:12]
+	id = config.APIKeyCredentialID(key)
+	hash := strings.TrimPrefix(id, config.APIKeyCredentialPrefix)
+	return id, "OpenCode Go credential " + hash[:12]
 }
 
 func (m *Manager) HandleManagement(ctx context.Context, req pluginapi.ManagementRequest) (pluginapi.ManagementResponse, error) {
@@ -80,23 +78,42 @@ func (m *Manager) HandleManagement(ctx context.Context, req pluginapi.Management
 		}
 	}
 	m.mu.RLock()
-	baseURL, timeout := m.cfg.BaseURL, m.cfg.RequestTimeout
 	keys := append([]config.APIKey(nil), m.cfg.APIKeys...)
+	directory := make(map[string]credentialBinding, len(m.credentialDirectory))
+	for id, binding := range m.credentialDirectory {
+		directory[id] = binding
+	}
 	m.mu.RUnlock()
 	if body.KeyID == "" {
 		cards := make([]quotaCard, 0, len(keys))
 		for _, key := range keys {
-			id, label := quotaIdentity(key.Value)
+			id := key.CredentialID
+			if id == "" {
+				id = config.APIKeyCredentialID(key.Value)
+			}
+			binding, ok := directory[id]
+			if !ok {
+				continue
+			}
+			_, label := quotaIdentity(binding.key)
 			cards = append(cards, quotaCard{KeyID: id, Label: label})
 		}
 		return quotaJSON(quotaList{Cards: cards})
 	}
 	for _, key := range keys {
-		id, label := quotaIdentity(key.Value)
+		id := key.CredentialID
+		if id == "" {
+			id = config.APIKeyCredentialID(key.Value)
+		}
 		if id != body.KeyID {
 			continue
 		}
-		usage, err := fetchQuota(ctx, m.bridge, baseURL, timeout, key.Value)
+		binding, ok := directory[id]
+		if !ok {
+			return pluginapi.ManagementResponse{StatusCode: http.StatusNotFound, Body: []byte(`{"error":"unknown quota key"}`)}, nil
+		}
+		_, label := quotaIdentity(binding.key)
+		usage, err := fetchQuota(ctx, m.bridge, binding.cfg.BaseURL, binding.cfg.RequestTimeout, binding.key)
 		if err != nil {
 			return pluginapi.ManagementResponse{StatusCode: http.StatusBadGateway, Body: []byte(`{"error":"quota refresh failed"}`)}, nil
 		}
