@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -122,13 +124,17 @@ func TestBridgeAuthSaveWaitsAfterStart(t *testing.T) {
 }
 
 func TestCatalogRevisionSyncFiltersDeduplicatesAndPreservesFields(t *testing.T) {
-	pathA := `C:\auth\a.json`
-	pathB := `C:\auth\b.json`
+	pathA := filepath.Join("auth", "a.json")
+	duplicatePathA := filepath.Join("auth", "sub", "..", "a.json")
+	if runtime.GOOS == "windows" {
+		duplicatePathA = strings.ToUpper(pathA)
+	}
+	pathB := filepath.Join("auth", "b.json")
 	host := newCatalogSyncHost([]pluginapi.HostAuthFileEntry{
 		{AuthIndex: "a1", Type: ProviderID, Path: pathA, Name: "a.json"},
-		{AuthIndex: "a2", Type: ProviderID, Path: strings.ToUpper(pathA), Name: "a2.json"},
-		{AuthIndex: "runtime", Type: ProviderID, Path: `C:\auth\runtime.json`, RuntimeOnly: true},
-		{AuthIndex: "other", Type: "claude", Path: `C:\auth\other.json`},
+		{AuthIndex: "a2", Type: ProviderID, Path: duplicatePathA, Name: "a2.json"},
+		{AuthIndex: "runtime", Type: ProviderID, Path: filepath.Join("auth", "runtime.json"), RuntimeOnly: true},
+		{AuthIndex: "other", Type: "claude", Path: filepath.Join("auth", "other.json")},
 		{AuthIndex: "nopath", Type: ProviderID, Name: "nopath.json"},
 		{AuthIndex: "b", Provider: "OpenCode-Go", Path: pathB, Name: "b.json"},
 	}, map[string][]byte{
