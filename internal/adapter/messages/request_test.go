@@ -404,6 +404,36 @@ func TestResponsesStringInputAndInstructions(t *testing.T) {
 	}
 }
 
+func TestQwen4MaxDefaultOutputBudget(t *testing.T) {
+	cases := []struct {
+		name   string
+		format string
+		body   string
+	}{
+		{name: "chat completions", format: "openai", body: `{"messages":[{"role":"user","content":"hello"}]}`},
+		{name: "responses", format: "openai-response", body: `{"input":"hello"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, eErr := BuildRequest("qwen4-max", tc.format, []byte(tc.body), nil)
+			if eErr != nil {
+				t.Fatalf("unexpected error: %v", eErr)
+			}
+			m := decodeReq(t, out)
+			if m["max_tokens"] != float64(qwen4MaxDefaultMaxTokens) {
+				t.Fatalf("max_tokens = %v, want %d", m["max_tokens"], qwen4MaxDefaultMaxTokens)
+			}
+		})
+	}
+	out, eErr := BuildRequest("qwen4-max", "openai-response", []byte(`{"input":"hello","max_output_tokens":42}`), nil)
+	if eErr != nil {
+		t.Fatalf("explicit budget: %v", eErr)
+	}
+	if got := decodeReq(t, out)["max_tokens"]; got != float64(42) {
+		t.Fatalf("explicit max_tokens = %v, want 42", got)
+	}
+}
+
 func TestResponsesItems(t *testing.T) {
 	body := `{
 		"instructions":"sys",

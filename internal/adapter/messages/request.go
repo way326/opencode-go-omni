@@ -44,6 +44,18 @@ type anthropicOutputConfig struct {
 	Effort string `json:"effort,omitempty"`
 }
 
+const qwen4MaxDefaultMaxTokens int64 = 32768
+
+func defaultMaxTokens(upstreamModel string, requested int64) int64 {
+	if requested > 0 {
+		return requested
+	}
+	if strings.EqualFold(strings.TrimSpace(upstreamModel), "qwen4-max") {
+		return qwen4MaxDefaultMaxTokens
+	}
+	return shared.ClaudeMaxTokens(0)
+}
+
 // messagesRequest is the outbound Anthropic encode shape — intentionally
 // divergent from shared.ClaudeTool decode type: typed stop sequences +
 // named items vs raw-ignore + tool_choice.
@@ -437,7 +449,7 @@ func fromChatCompletions(upstreamModel string, body []byte, ts *pluginapi.Thinki
 	}
 	req := &messagesRequest{
 		Model:       upstreamModel,
-		MaxTokens:   shared.ClaudeMaxTokens(maxTokens),
+		MaxTokens:   defaultMaxTokens(upstreamModel, maxTokens),
 		Stream:      src.Stream,
 		Temperature: src.Temperature,
 		TopP:        src.TopP,
@@ -548,7 +560,7 @@ func fromResponses(upstreamModel string, body []byte, ts *pluginapi.ThinkingSupp
 	}
 	req := &messagesRequest{
 		Model:       upstreamModel,
-		MaxTokens:   shared.ClaudeMaxTokens(maxTokens),
+		MaxTokens:   defaultMaxTokens(upstreamModel, maxTokens),
 		Stream:      src.Stream,
 		Temperature: src.Temperature,
 		TopP:        src.TopP,
