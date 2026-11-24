@@ -14,12 +14,18 @@ if ! command -v git-filter-repo >/dev/null 2>&1; then
   exit 1
 fi
 
-python_bin="$(command -v python3 || command -v python || true)"
-if [[ -z "${python_bin}" ]]; then
-  echo "Python is required to verify git-filter-repo version" >&2
-  exit 1
-fi
-version="$("${python_bin}" -c 'from importlib.metadata import version; print(version("git-filter-repo"))' 2>/dev/null || true)"
+python_bin=""
+version=""
+for candidate in python3 python; do
+  if command -v "${candidate}" >/dev/null 2>&1; then
+    candidate_version="$("${candidate}" -c 'from importlib.metadata import version; print(version("git-filter-repo"))' 2>/dev/null || true)"
+    if [[ -n "${candidate_version}" ]]; then
+      python_bin="${candidate}"
+      version="${candidate_version}"
+      break
+    fi
+  fi
+done
 if [[ -z "${version}" ]] || ! "${python_bin}" -c 'import sys; v=tuple(int(n) for n in sys.argv[1].split(".")); raise SystemExit(0 if v >= (2, 47, 0) else 1)' "${version}"; then
   echo "git-filter-repo version 2.47.0 or newer is required" >&2
   exit 1
