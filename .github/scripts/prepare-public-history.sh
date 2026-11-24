@@ -52,6 +52,24 @@ trap cleanup EXIT
 
 printf 'way326 <%s> <%s>\n' "${NOREPLY_EMAIL}" "${OLD_EMAIL}" > "${mailmap}"
 
+filter_args=(
+  --force
+  --mailmap "${mailmap}"
+  --invert-paths
+  --path docs
+  --path VALIDATION.md
+  --path TOOL_IMAGE_FIX_PLAN.md
+  --path PLUGIN_ONLY_499_REFACTOR_PLAN.md
+  --path-glob 'OpenCode-Go-Omni-*.md'
+)
+if [[ -n "${PUBLIC_HISTORY_REPLACEMENTS_FILE:-}" ]]; then
+  if [[ ! -f "${PUBLIC_HISTORY_REPLACEMENTS_FILE}" ]]; then
+    echo "configured history replacement file is missing" >&2
+    exit 1
+  fi
+  filter_args+=(--replace-text "${PUBLIC_HISTORY_REPLACEMENTS_FILE}")
+fi
+
 mapfile -t tags < <(git tag --list)
 if (( ${#tags[@]} > 0 )); then
   git tag --delete "${tags[@]}" >/dev/null
@@ -59,15 +77,7 @@ fi
 
 # The public repository does not carry internal audit/design documents. Old
 # root-level names are included because they remain in Git history after moves.
-git filter-repo \
-  --force \
-  --mailmap "${mailmap}" \
-  --invert-paths \
-  --path docs \
-  --path VALIDATION.md \
-  --path TOOL_IMAGE_FIX_PLAN.md \
-  --path PLUGIN_ONLY_499_REFACTOR_PLAN.md \
-  --path-glob 'OpenCode-Go-Omni-*.md'
+git filter-repo "${filter_args[@]}"
 
 if git log --all --format='%ae%n%ce' | grep -F --quiet "${OLD_EMAIL}"; then
   echo "rewrite failed: old email remains in commit metadata" >&2
