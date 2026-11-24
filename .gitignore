@@ -8,3 +8,15 @@
 *.zip
 *.sha256
 __pycache__/
+/docs/
+
+# Local credentials and debug artifacts must stay out of public history.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+opencode-go-debug.log

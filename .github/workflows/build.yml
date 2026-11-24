@@ -8,10 +8,17 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   PLUGIN_ID: opencode-go-omni
+  ZIG_VERSION: 0.16.0
+  ZIG_SHA256: 70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
+  FREEBSD_BASE_SHA256: e38b5cf756d60086a6c2f736eff19cc7685f7e2313e31d14342fc8df57200a92
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
   test:
@@ -19,21 +26,33 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
 
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
         with:
           go-version-file: go.mod
           cache: true
 
       - name: Test
-        run: go test ./...
+        run: go test -tags debug ./...
 
       - name: Vet
         run: go vet ./...
 
-  build:
+      - name: Vulnerability scan
+        run: |
+          set -euo pipefail
+          go install golang.org/x/vuln/cmd/govulncheck@v1.10.0
+          "$(go env GOPATH)/bin/govulncheck" ./...
+
+      - name: Validate workflows
+        run: |
+          set -euo pipefail
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+          "$(go env GOPATH)/bin/actionlint" .github/workflows/*.yml
+
+  build-native:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
     needs: test
     runs-on: ${{ matrix.runner }}
@@ -41,14 +60,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - goos: linux
-            goarch: amd64
-            runner: ubuntu-24.04
-            ext: so
-          - goos: linux
-            goarch: arm64
-            runner: ubuntu-24.04-arm
-            ext: so
           - goos: darwin
             goarch: amd64
             runner: macos-15-intel
@@ -61,15 +72,12 @@ jobs:
             goarch: amd64
             runner: windows-2025
             ext: dll
-    defaults:
-      run:
-        shell: bash
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
 
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
         with:
           go-version-file: go.mod
           cache: true
@@ -86,15 +94,21 @@ jobs:
           echo "LIB_NAME=${PLUGIN_ID}.${{ matrix.ext }}" >> "${GITHUB_ENV}"
           echo "ARCHIVE_NAME=${PLUGIN_ID}_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}.zip" >> "${GITHUB_ENV}"
 
+      - name: Download Go modules
+        run: go mod download
+
       - name: Build shared library
         run: |
           set -euo pipefail
           mkdir -p dist
           CGO_ENABLED=1 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
-            go build -trimpath -buildmode=c-shared \
-              -ldflags "-s -w" \
+            go build -trimpath -buildmode=c-shared -ldflags "-s -w" \
               -o "dist/${LIB_NAME}" .
           rm -f "dist/${PLUGIN_ID}.h"
+
+      - name: Windows ABI smoke
+        if: matrix.goos == 'windows' && matrix.goarch == 'amd64'
+        run: python tools/abi_smoke.py "dist/${PLUGIN_ID}.dll"
 
       - name: Package plugin
         run: |
@@ -105,99 +119,40 @@ jobs:
             -checksum "${ARCHIVE_NAME}.sha256"
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: ${{ env.ARCHIVE_NAME }}
           path: |
             ${{ env.ARCHIVE_NAME }}
             ${{ env.ARCHIVE_NAME }}.sha256
           if-no-files-found: error
+          retention-days: 7
 
-  build-windows-arm64:
-    name: Build windows/arm64
+  build-linux:
+    name: Build linux/${{ matrix.goarch }}
     needs: test
-    runs-on: ubuntu-24.04
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Setup Go
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Resolve release metadata
-        id: release_metadata
-        run: |
-          set -euo pipefail
-          if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" == v* ]]; then
-            VERSION="${GITHUB_REF_NAME#v}"
-          else
-            VERSION="0.0.0-dev"
-          fi
-          echo "VERSION=${VERSION}" >> "${GITHUB_ENV}"
-          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
-          echo "ARCHIVE_NAME=${PLUGIN_ID}_${VERSION}_windows_arm64.zip" >> "${GITHUB_ENV}"
-
-      - name: Build Windows ARM64 shared library
-        timeout-minutes: 45
-        uses: go-cross/cgo-actions@v1
-        env:
-          GOFLAGS: -trimpath -buildmode=c-shared
-        with:
-          dir: .
-          packages: .
-          targets: windows-arm64
-          out-dir: dist/windows-arm64
-          output: ${{ env.PLUGIN_ID }}.dll
-          flags: -ldflags=-s -w
-
-      - name: Package plugin
-        run: |
-          set -euo pipefail
-          rm -f go-cross-bin.h "dist/windows-arm64/${PLUGIN_ID}.h"
-          go run ./.github/scripts/package-release.go \
-            -library "dist/windows-arm64/${PLUGIN_ID}.dll" \
-            -archive "${ARCHIVE_NAME}" \
-            -checksum "${ARCHIVE_NAME}.sha256"
-
-      - name: Upload build artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.ARCHIVE_NAME }}
-          path: |
-            ${{ env.ARCHIVE_NAME }}
-            ${{ env.ARCHIVE_NAME }}.sha256
-          if-no-files-found: error
-
-  build-freebsd:
-    name: Build freebsd/${{ matrix.goarch }}
-    needs: test
-    runs-on: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - goarch: amd64
-    defaults:
-      run:
-        shell: bash
+            runner: ubuntu-24.04
+            image: quay.io/pypa/manylinux2014_x86_64@sha256:8a79ff36ce155d8f242dc8013d73c5e8bbe937defb15de7d7afb342c1ab537f4
+          - goarch: arm64
+            runner: ubuntu-24.04-arm
+            image: quay.io/pypa/manylinux2014_aarch64@sha256:382236bfd11d86894d9792a6fa5286190b8dd3d075a7032284e123c288711e4f
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
 
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
         with:
           go-version-file: go.mod
           cache: true
 
       - name: Resolve release metadata
-        id: release_metadata
         run: |
           set -euo pipefail
           if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" == v* ]]; then
@@ -206,76 +161,252 @@ jobs:
             VERSION="0.0.0-dev"
           fi
           echo "VERSION=${VERSION}" >> "${GITHUB_ENV}"
-          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
-          echo "ARCHIVE_NAME=${PLUGIN_ID}_${VERSION}_freebsd_${{ matrix.goarch }}.zip" >> "${GITHUB_ENV}"
+          echo "ARCHIVE_NAME=${PLUGIN_ID}_${VERSION}_linux_${{ matrix.goarch }}.zip" >> "${GITHUB_ENV}"
 
-      - name: Install FreeBSD cross-build dependencies
+      - name: Download Go modules
+        run: go mod download
+
+      - name: Build in glibc 2.17 container
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y clang lld wget
-          cat << 'EOF' | sudo tee /usr/local/bin/wget >/dev/null
-          #!/bin/bash
-          args=()
-          for a in "$@"; do
-            if [[ "$a" == *"download.freebsd.org/releases/"*"/14.3-RELEASE/base.txz"* ]]; then
-              args+=("${a/download.freebsd.org\/releases/archive.freebsd.org\/old-releases}")
-            else
-              args+=("$a")
-            fi
-          done
-          exec /usr/bin/wget "${args[@]}"
-          EOF
-          sudo chmod +x /usr/local/bin/wget
+          GOROOT_PATH="$(go env GOROOT)"
+          GOMODCACHE_PATH="$(go env GOMODCACHE)"
+          docker pull "${{ matrix.image }}"
+          docker run --rm \
+            --network none \
+            --read-only \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --tmpfs /tmp:rw,exec,nosuid,nodev \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            -e TARGET_GOARCH=${{ matrix.goarch }} \
+            -v "${GITHUB_WORKSPACE}:/workspace" \
+            -v "${GOROOT_PATH}:/go-toolchain:ro" \
+            -v "${GOMODCACHE_PATH}:/go/pkg/mod:rw" \
+            -w /workspace \
+            "${{ matrix.image }}" \
+            bash .github/scripts/build-linux.sh
 
-      - name: Build FreeBSD shared library
-        timeout-minutes: 45
-        uses: go-cross/cgo-actions@v1
-        env:
-          GOFLAGS: -trimpath -buildmode=c-shared
-        with:
-          dir: .
-          packages: .
-          targets: freebsd-${{ matrix.goarch }}
-          out-dir: dist/freebsd-${{ matrix.goarch }}
-          output: ${{ env.PLUGIN_ID }}.so
-          flags: -ldflags=-s -w
+      - name: Verify ELF and glibc baseline
+        run: |
+          set -euo pipefail
+          library="dist/${PLUGIN_ID}.so"
+          test -f "${library}"
+          file "${library}" | grep -Eq 'ELF 64-bit.*(x86-64|ARM aarch64)'
+          max_glibc="$(readelf --version-info "${library}" | grep -oE 'GLIBC_[0-9.]+' | sort -Vu | tail -n 1 || true)"
+          echo "max_glibc=${max_glibc:-none}"
+          if [[ -n "${max_glibc}" ]]; then
+            highest="$(printf '%s\n' "${max_glibc}" GLIBC_2.17 | sort -V | tail -n 1)"
+            test "${highest}" = "GLIBC_2.17"
+          fi
 
       - name: Package plugin
         run: |
           set -euo pipefail
-          rm -f go-cross-bin.h "dist/freebsd-${{ matrix.goarch }}/${PLUGIN_ID}.h"
           go run ./.github/scripts/package-release.go \
-            -library "dist/freebsd-${{ matrix.goarch }}/${PLUGIN_ID}.so" \
+            -library "dist/${PLUGIN_ID}.so" \
             -archive "${ARCHIVE_NAME}" \
             -checksum "${ARCHIVE_NAME}.sha256"
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: ${{ env.ARCHIVE_NAME }}
           path: |
             ${{ env.ARCHIVE_NAME }}
             ${{ env.ARCHIVE_NAME }}.sha256
           if-no-files-found: error
+          retention-days: 7
+
+  build-windows-arm64:
+    name: Build windows/arm64
+    needs: test
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Resolve release metadata
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" == v* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="0.0.0-dev"
+          fi
+          echo "VERSION=${VERSION}" >> "${GITHUB_ENV}"
+          echo "ARCHIVE_NAME=${PLUGIN_ID}_${VERSION}_windows_arm64.zip" >> "${GITHUB_ENV}"
+
+      - name: Install verified Zig cross compiler
+        run: |
+          set -euo pipefail
+          archive="zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
+          curl --fail --location --retry 3 \
+            "https://ziglang.org/download/${ZIG_VERSION}/${archive}" \
+            --output "${RUNNER_TEMP}/${archive}"
+          (cd "${RUNNER_TEMP}" && printf '%s  %s\n' "${ZIG_SHA256}" "${archive}" | sha256sum -c -)
+          tar -xJf "${RUNNER_TEMP}/${archive}" -C "${RUNNER_TEMP}"
+          zig_home="${RUNNER_TEMP}/zig-x86_64-linux-${ZIG_VERSION}"
+          cat > "${RUNNER_TEMP}/zcc" <<EOF
+          #!/bin/sh
+          exec "${zig_home}/zig" cc -target aarch64-windows-gnu "\$@"
+          EOF
+          chmod +x "${RUNNER_TEMP}/zcc"
+          echo "${RUNNER_TEMP}" >> "${GITHUB_PATH}"
+          "${zig_home}/zig" version
+
+      - name: Build Windows ARM64 shared library
+        run: |
+          set -euo pipefail
+          go mod download
+          mkdir -p dist
+          CGO_ENABLED=1 GOOS=windows GOARCH=arm64 CC=zcc \
+            go build -trimpath -buildmode=c-shared -ldflags "-s -w" \
+              -o "dist/${PLUGIN_ID}.dll" .
+          rm -f "dist/${PLUGIN_ID}.h"
+          python3 - <<'PY'
+          import struct
+          from pathlib import Path
+          data = Path('dist/opencode-go-omni.dll').read_bytes()
+          pe_offset = struct.unpack_from('<I', data, 0x3c)[0]
+          machine = struct.unpack_from('<H', data, pe_offset + 4)[0]
+          if machine != 0xaa64:
+              raise SystemExit(f'unexpected PE machine: {machine:#x}')
+          print(f'PE machine={machine:#x}')
+          PY
+
+      - name: Package plugin
+        run: |
+          set -euo pipefail
+          go run ./.github/scripts/package-release.go \
+            -library "dist/${PLUGIN_ID}.dll" \
+            -archive "${ARCHIVE_NAME}" \
+            -checksum "${ARCHIVE_NAME}.sha256"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ${{ env.ARCHIVE_NAME }}
+          path: |
+            ${{ env.ARCHIVE_NAME }}
+            ${{ env.ARCHIVE_NAME }}.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  build-freebsd:
+    name: Build freebsd/amd64
+    needs: test
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Resolve release metadata
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" == v* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="0.0.0-dev"
+          fi
+          echo "VERSION=${VERSION}" >> "${GITHUB_ENV}"
+          echo "ARCHIVE_NAME=${PLUGIN_ID}_${VERSION}_freebsd_amd64.zip" >> "${GITHUB_ENV}"
+
+      - name: Install cross-build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes clang lld binutils
+
+      - name: Download verified FreeBSD sysroot
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/freebsd-base.txz"
+          sysroot="${RUNNER_TEMP}/freebsd-sysroot"
+          curl --fail --location --retry 3 \
+            "https://archive.freebsd.org/old-releases/amd64/amd64/14.3-RELEASE/base.txz" \
+            --output "${archive}"
+          (cd "${RUNNER_TEMP}" && printf '%s  %s\n' "${FREEBSD_BASE_SHA256}" "freebsd-base.txz" | sha256sum -c -)
+          mkdir -p "${sysroot}"
+          tar -xJf "${archive}" -C "${sysroot}"
+          echo "FREEBSD_SYSROOT=${sysroot}" >> "${GITHUB_ENV}"
+
+      - name: Build FreeBSD shared library
+        run: |
+          set -euo pipefail
+          go mod download
+          mkdir -p dist
+          CGO_ENABLED=1 GOOS=freebsd GOARCH=amd64 \
+            CC="clang --target=x86_64-unknown-freebsd14.3 --sysroot=${FREEBSD_SYSROOT}" \
+            CGO_LDFLAGS="-fuse-ld=lld" \
+            go build -trimpath -buildmode=c-shared -ldflags "-s -w" \
+              -o "dist/${PLUGIN_ID}.so" .
+          rm -f "dist/${PLUGIN_ID}.h"
+          file "dist/${PLUGIN_ID}.so" | grep -q 'FreeBSD'
+
+      - name: Package plugin
+        run: |
+          set -euo pipefail
+          go run ./.github/scripts/package-release.go \
+            -library "dist/${PLUGIN_ID}.so" \
+            -archive "${ARCHIVE_NAME}" \
+            -checksum "${ARCHIVE_NAME}.sha256"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ${{ env.ARCHIVE_NAME }}
+          path: |
+            ${{ env.ARCHIVE_NAME }}
+            ${{ env.ARCHIVE_NAME }}.sha256
+          if-no-files-found: error
+          retention-days: 7
 
   release:
     name: Release
     if: startsWith(github.ref, 'refs/tags/v')
     needs:
-      - build
+      - build-native
+      - build-linux
       - build-windows-arm64
       - build-freebsd
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
 
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           path: dist
           merge-multiple: true
+
+      - name: Assemble and verify checksums
+        run: |
+          set -euo pipefail
+          sort dist/*.sha256 > dist/checksums.txt
+          (cd dist && sha256sum -c checksums.txt)
+
+      - name: Attest release archives
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be
+        with:
+          subject-path: dist/*.zip
 
       - name: Publish GitHub release
         env:
@@ -283,7 +414,6 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          sort dist/*.sha256 > dist/checksums.txt
           if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
             gh release upload "${GITHUB_REF_NAME}" dist/*.zip dist/checksums.txt --clobber --repo "${GITHUB_REPOSITORY}"
           else

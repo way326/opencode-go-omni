@@ -29,8 +29,9 @@ try {
     $archive = Join-Path $dist "opencode-go-omni_0.2.2_windows_amd64.zip"
     & $resolvedGo -C $sourceRoot run ./.github/scripts/package-release.go -library $library -archive $archive -checksum "$archive.sha256"
     if ($LASTEXITCODE -ne 0) { throw "Packaging failed." }
-    Write-Output "Built plugin only: $library"
-    Get-FileHash -LiteralPath $library -Algorithm SHA256
+    Write-Output "Built plugin only: dist\opencode-go-omni.dll"
+    $dllHash = Get-FileHash -LiteralPath $library -Algorithm SHA256
+    Write-Output "SHA256 $($dllHash.Hash)"
 } finally {
     $env:CGO_ENABLED = $savedCGO
     $env:CC = $savedCC

@@ -75,7 +75,7 @@ func packageLibrary(libraryPath, archivePath string) ([]byte, error) {
 		return nil, fmt.Errorf("copy library: %w", errCopy)
 	}
 	// Keep installation guidance and upstream attribution with the local fork.
-	for _, name := range []string{"README.md", "LICENSE", "config.example.yaml", "VALIDATION.md"} {
+	for _, name := range []string{"README.md", "LICENSE", "config.example.yaml"} {
 		data, errRead := os.ReadFile(name)
 		if os.IsNotExist(errRead) {
 			continue

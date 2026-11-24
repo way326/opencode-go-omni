@@ -32,7 +32,7 @@ Plugin version: **0.2.2**. This project is a maintained fork of [massiveits/open
 ## Requirements
 
 - **CPA v8** with native plugin support.
-- **Go 1.26+** and a CGO-capable C compiler *to build* (LLVM-MinGW on Windows). The compiled plugin needs nothing extra at runtime.
+- **Go 1.26.11+** and a CGO-capable C compiler *to build* (LLVM-MinGW on Windows). The compiled plugin needs nothing extra at runtime.
 - OpenCode Go subscription API keys. **No OAuth** is implemented.
 
 ## Install
@@ -157,7 +157,7 @@ Tests under `tests/` carry the `live` build tag and are opt-in against a running
 
 See [CONTRIBUTING.md](CONTRIBUTING.md): focused PRs against `main`, local builds and tests with `-tags debug`, offline unit tests only, and release-note updates for user-facing changes.
 
-Working documents from before the rename to `opencode-go-omni` (validation records and fix plans) are preserved verbatim under [docs/](docs/) with a short index. Version history is kept in [RELEASE_NOTES.md](RELEASE_NOTES.md).
+Version history is kept in [RELEASE_NOTES.md](RELEASE_NOTES.md). Internal working documents and validation records are not part of this public repository.
 
 ## Compatibility & status
 

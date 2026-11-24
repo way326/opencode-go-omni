@@ -1,14 +1,40 @@
 # Release Notes
 
-## Unreleased
+## 0.2.2 - 2026-11-24
 
 ### Catalog discovery
 
-- Decode the live catalog's `name`, nested `limit`/`modalities`, and `recommended_api`/`api` protocol metadata while preserving older flat fields.
-- Route new model families through an allowlisted mapping to the four supported wire protocols. User overrides and exact compatibility entries retain precedence; family prefixes remain a fallback only when protocol metadata is absent. Unsupported or ambiguous protocols stay excluded with diagnostics.
-- Keep explicitly unavailable models blocked even when their catalog metadata advertises a supported protocol; a user override remains the explicit retry path.
-- Pin `hungerg-free` to Chat Completions as a compatibility fallback and add regression coverage for new-family auto-discovery, exact-route precedence, unsupported decision protocols, ambiguous metadata, and Gemini's `generate-content` fallback.
-- Catalog routing does not establish live inference acceptance for every model or account.
+- Decode the live catalog's `name`, nested `limit`/`modalities`, and
+  `recommended_api`/`api` protocol metadata while preserving older flat fields.
+- Route new model families through an allowlisted mapping to the four supported
+  wire protocols. User overrides and exact compatibility entries retain
+  precedence; family prefixes remain a fallback only when protocol metadata is
+  absent. Unsupported or ambiguous protocols stay excluded with diagnostics.
+- Keep explicitly unavailable models blocked even when their catalog metadata
+  advertises a supported protocol; a user override remains the explicit retry
+  path.
+- Pin `hungerg-free` to Chat Completions as a compatibility fallback and add
+  regression coverage for new-family auto-discovery, exact-route precedence,
+  unsupported decision protocols, ambiguous metadata, and Gemini's
+  `generate-content` fallback.
+- Catalog routing does not establish live inference acceptance for every model
+  or account.
+
+### Publication and supply-chain hardening
+
+- Pin every GitHub Action to a full commit SHA, reduce default workflow
+  permissions to read-only, and grant release write/attestation permissions
+  only to the tag release job.
+- Replace the mutable third-party cross-build action with a checksum-verified
+  Zig installation for Windows ARM64 and a checksum-verified FreeBSD sysroot.
+- Build Linux assets in digest-pinned glibc 2.17 containers with networking
+  disabled, and fail the build when the resulting library requires a newer
+  GLIBC baseline.
+- Verify release checksums before publication and emit GitHub build provenance
+  attestations for every platform ZIP.
+- Add per-response CSP nonces and browser security headers to the quota page.
+- Upgrade the Go toolchain and vulnerable transitive modules, add weekly
+  Dependabot coverage, and run `govulncheck` in CI.
 
 ### Credential secret exposure remediation
 
@@ -26,8 +52,6 @@
 - Confirm SDK/Core compatibility and exercise the installed CPA ABI before
   treating the change as runtime-verified. Management Center preview/copy
   redaction is a companion frontend change and does not protect raw downloads.
-
-## 0.2.2 - 2026-11-17
 
 ### Runtime catalog synchronization
 

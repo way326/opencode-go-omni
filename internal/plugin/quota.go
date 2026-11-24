@@ -2,6 +2,8 @@ package plugin
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -65,8 +67,7 @@ func (m *Manager) HandleManagement(ctx context.Context, req pluginapi.Management
 		version = "/v0"
 	}
 	if req.Method == http.MethodGet && req.Path == version+"/resource/plugins/"+pluginName+"/quota" {
-		page := strings.ReplaceAll(resources.QuotaPage, "__QUOTA_ENDPOINT__", version+"/management/plugins/"+pluginName+"/quota-usage")
-		return pluginapi.ManagementResponse{Headers: http.Header{"Content-Type": []string{"text/html; charset=utf-8"}}, Body: []byte(page)}, nil
+		return quotaPageResponse(version)
 	}
 	if req.Method != http.MethodPost || req.Path != version+"/management/plugins/"+pluginName+"/quota-usage" {
 		return pluginapi.ManagementResponse{StatusCode: http.StatusNotFound, Body: []byte(`{"error":"not found"}`)}, nil
@@ -120,6 +121,35 @@ func (m *Manager) HandleManagement(ctx context.Context, req pluginapi.Management
 		return quotaJSON(quotaCard{KeyID: id, Label: label, Usage: &usage})
 	}
 	return pluginapi.ManagementResponse{StatusCode: http.StatusNotFound, Body: []byte(`{"error":"unknown quota key"}`)}, nil
+}
+
+func quotaPageResponse(version string) (pluginapi.ManagementResponse, error) {
+	nonceBytes := make([]byte, 18)
+	if _, err := rand.Read(nonceBytes); err != nil {
+		return pluginapi.ManagementResponse{}, fmt.Errorf("generate quota page nonce")
+	}
+	nonce := base64.RawURLEncoding.EncodeToString(nonceBytes)
+
+	page := strings.ReplaceAll(resources.QuotaPage, "__QUOTA_ENDPOINT__", version+"/management/plugins/"+pluginName+"/quota-usage")
+	if strings.Count(page, "<script>") != 2 || strings.Count(page, "<style>") != 1 {
+		return pluginapi.ManagementResponse{}, fmt.Errorf("quota page inline resource shape changed")
+	}
+	page = strings.ReplaceAll(page, "<script>", `<script nonce="`+nonce+`">`)
+	page = strings.ReplaceAll(page, "<style>", `<style nonce="`+nonce+`">`)
+
+	csp := "default-src 'none'; " +
+		"script-src 'nonce-" + nonce + "'; " +
+		"style-src 'nonce-" + nonce + "'; " +
+		"connect-src 'self'; base-uri 'none'; form-action 'none'; " +
+		"frame-ancestors 'self'; object-src 'none'"
+	return pluginapi.ManagementResponse{Headers: http.Header{
+		"Content-Type":            []string{"text/html; charset=utf-8"},
+		"Content-Security-Policy": []string{csp},
+		"Cache-Control":           []string{"no-store"},
+		"X-Content-Type-Options":  []string{"nosniff"},
+		"X-Frame-Options":         []string{"SAMEORIGIN"},
+		"Referrer-Policy":         []string{"no-referrer"},
+	}, Body: []byte(page)}, nil
 }
 
 type quotaList struct {
