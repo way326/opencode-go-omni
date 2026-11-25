@@ -68,6 +68,7 @@ if [[ -n "${PUBLIC_HISTORY_REPLACEMENTS_FILE:-}" ]]; then
     exit 1
   fi
   filter_args+=(--replace-text "${PUBLIC_HISTORY_REPLACEMENTS_FILE}")
+  filter_args+=(--replace-message "${PUBLIC_HISTORY_REPLACEMENTS_FILE}")
 fi
 
 mapfile -t tags < <(git tag --list)
@@ -84,6 +85,21 @@ if git log --all --format='%ae%n%ce' | grep -F --quiet "${OLD_EMAIL}"; then
   exit 1
 fi
 
+if git log --all --format='%B' | grep -F --quiet "${OLD_EMAIL}"; then
+  echo "rewrite failed: old email remains in commit messages" >&2
+  exit 1
+fi
+
+if git rev-list --objects --all \
+  | git cat-file --batch-check='%(objectname) %(objecttype)' \
+  | awk '$2 == "blob" {print $1}' \
+  | sort -u \
+  | while IFS= read -r object; do git cat-file blob "${object}"; done \
+  | grep -F --quiet "${OLD_EMAIL}"; then
+  echo "rewrite failed: old email remains in file history" >&2
+  exit 1
+fi
+
 if [[ -n "$(git for-each-ref refs/tags --format='%(refname)')" ]]; then
   echo "rewrite failed: tags must be recreated with a noreply tagger identity" >&2
   exit 1
@@ -94,7 +110,7 @@ if git log --all --name-only --pretty=format: | grep -Eq '^(docs/|VALIDATION\.md
   exit 1
 fi
 
-local_path_pattern='[A-Za-z]:[/\\]|/(Users|home)/[^/]+/'
+local_path_pattern='[A-Za-z]:[/\\][A-Za-z0-9_.~$-]|/(Users|home)/[^/]+/'
 if git log --all --format='%B' | grep -Ei "${local_path_pattern}" >/dev/null; then
   echo "rewrite failed: local absolute paths remain in commit messages" >&2
   exit 1

@@ -49,6 +49,7 @@ body { margin: 0; padding: 32px; color: var(--text-primary); background: var(--b
 .quota-header { display: flex; justify-content: flex-start; align-items: center; gap: 96px; margin-bottom: 24px; flex-wrap: wrap; }
 .quota-header-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .quota-btn { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--border-color); border-radius: 8px; padding: 8px 12px; color: var(--text-primary); background: var(--bg-tertiary); font: inherit; font-size: 12px; font-weight: 500; text-decoration: none; cursor: pointer; transition: background .15s, border-color .15s; }
+.quota-btn[hidden] { display: none; }
 .quota-btn:hover { border-color: var(--primary-color); background: var(--bg-primary); }
 .quota-btn:disabled { cursor: not-allowed; opacity: .6; }
 .quota-title { margin: 0; font-size: 28px; font-weight: 700; line-height: 1.2; }
@@ -86,7 +87,7 @@ body { margin: 0; padding: 32px; color: var(--text-primary); background: var(--b
       <p class="quota-description">Usage for each configured credential.</p>
     </div>
     <div class="quota-header-actions">
-      <button id="refresh-all-btn" class="quota-btn" style="display: none;">Refresh All</button>
+      <button id="refresh-all-btn" class="quota-btn" hidden>Refresh All</button>
       <a href="https://github.com/way326/opencode-go-omni" target="_blank" rel="noopener noreferrer" class="quota-btn" aria-label="Star on GitHub">
         <span aria-hidden="true">&#9733;</span> Star on GitHub
       </a>
@@ -180,12 +181,7 @@ body { margin: 0; padding: 32px; color: var(--text-primary); background: var(--b
     row.append(value, track, meta);
   }
   function render(cards) {
-    if (cards.length > 0) {
-      if (refreshAllBtn) refreshAllBtn.style.display = "";
-    }
-    if (cards.length === 0) {
-      if (refreshAllBtn) refreshAllBtn.style.display = "none";
-    }
+    if (refreshAllBtn) refreshAllBtn.hidden = cards.length === 0;
     app.textContent = "";
     if (!cards.length) { const p = document.createElement("p"); p.className = "quota-muted"; p.setAttribute("role", "status"); p.textContent = "No configured credentials."; app.appendChild(p); return; }
     const grid = document.createElement("div"); grid.className = "quota-grid";

@@ -19,7 +19,6 @@ func TestFindMaterializationTargetRejectsAmbiguousOwnership(t *testing.T) {
 		entries []pluginapi.HostAuthFileEntry
 	}{
 		{name: "different name", entries: []pluginapi.HostAuthFileEntry{{ID: id, Name: "different.json", AuthIndex: "auth-index", Type: ProviderID, Path: valid.Path}}},
-		{name: "different id", entries: []pluginapi.HostAuthFileEntry{{ID: "other", Name: name, AuthIndex: "auth-index", Type: ProviderID, Path: valid.Path}}},
 		{name: "wrong provider", entries: []pluginapi.HostAuthFileEntry{{ID: id, Name: name, AuthIndex: "auth-index", Type: "claude", Path: valid.Path}}},
 		{name: "runtime only", entries: []pluginapi.HostAuthFileEntry{{ID: id, Name: name, AuthIndex: "auth-index", Type: ProviderID, Path: valid.Path, RuntimeOnly: true}}},
 		{name: "missing path", entries: []pluginapi.HostAuthFileEntry{{ID: id, Name: name, AuthIndex: "auth-index", Type: ProviderID}}},
@@ -35,6 +34,9 @@ func TestFindMaterializationTargetRejectsAmbiguousOwnership(t *testing.T) {
 	}
 	if _, found, err := findMaterializationTarget([]pluginapi.HostAuthFileEntry{valid}, id, name); err != nil || !found {
 		t.Fatalf("valid target result found=%t err=%v", found, err)
+	}
+	if _, found, err := findMaterializationTarget([]pluginapi.HostAuthFileEntry{{ID: name, Name: name, AuthIndex: "auth-index", Type: ProviderID, Path: valid.Path}}, id, name); err != nil || !found {
+		t.Fatalf("CPA filename-normalized ID target result found=%t err=%v", found, err)
 	}
 	if _, found, err := findMaterializationTarget(nil, id, name); err != nil || found {
 		t.Fatalf("missing target result found=%t err=%v", found, err)
