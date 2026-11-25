@@ -1,5 +1,17 @@
 # Release Notes
 
+## 0.2.3 - 2026-11-25
+
+### CLIProxyAPI 8.1.2 compatibility
+
+- Accept CPA file-backed Auth IDs that are reported as the credential filename
+  (including the exact `.json` suffix) while continuing to resolve credentials
+  only through the configured canonical ID directory.
+- Match existing materialized auth files by exact filename, then verify their
+  provider, canonical ID, physical path, and any legacy key before reuse.
+- Add regression tests for CPA's filename-normalized Auth IDs and ensure
+  malformed suffixes and unrelated configured IDs still fail closed.
+
 ## 0.2.2 - 2026-11-24
 
 ### Catalog discovery

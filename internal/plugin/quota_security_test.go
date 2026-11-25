@@ -64,6 +64,11 @@ func TestQuotaPageSecurityHeadersAndNonce(t *testing.T) {
 	if strings.Contains(body, "__QUOTA_ENDPOINT__") {
 		t.Fatal("quota endpoint placeholder was not materialized")
 	}
+	if !strings.Contains(body, `<button id="refresh-all-btn" class="quota-btn" hidden>`) ||
+		strings.Contains(body, `<button id="refresh-all-btn" class="quota-btn" style=`) ||
+		!strings.Contains(body, "refreshAllBtn.hidden = cards.length === 0") {
+		t.Fatal("refresh-all visibility must not depend on a CSP-blocked style attribute")
+	}
 	if !strings.Contains(body, "/v8/management/plugins/"+pluginName+"/quota-usage") {
 		t.Fatal("quota management endpoint is missing")
 	}

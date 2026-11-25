@@ -53,13 +53,21 @@ func (m *Manager) selectedCredential(req executorRequest) (credentialBinding, ke
 		return credentialBinding{}, "", fmt.Errorf("selected auth provider is not %s", ProviderID)
 	}
 	if strings.HasPrefix(req.AuthID, credentialIDPrefix) {
-		if !isCanonicalCredentialID(req.AuthID) {
+		credentialID := req.AuthID
+		// Some CPA versions expose a file-backed Auth.ID as the filename,
+		// including the .json suffix, even when the file's own id field is the
+		// canonical credential reference. Normalize only that exact filename
+		// form; the normalized ID must still match an active configured binding.
+		if len(credentialID) > len(".json") && strings.EqualFold(credentialID[len(credentialID)-len(".json"):], ".json") {
+			credentialID = credentialID[:len(credentialID)-len(".json")]
+		}
+		if !isCanonicalCredentialID(credentialID) {
 			return credentialBinding{}, keySourceCredentialID, fmt.Errorf("selected credential id has invalid format")
 		}
 		m.mu.RLock()
-		binding, ok := m.credentialDirectory[req.AuthID]
+		binding, ok := m.credentialDirectory[credentialID]
 		if !ok {
-			binding, ok = m.stagedCredentialDirectory[req.AuthID]
+			binding, ok = m.stagedCredentialDirectory[credentialID]
 		}
 		m.mu.RUnlock()
 		if !ok {

@@ -761,6 +761,78 @@ func TestReferenceOnlyExecutionUsesExactAuthIDAndRejectsConflictingLegacyKey(t *
 	}
 }
 
+func TestReferenceOnlyExecutionAcceptsCPAFilenameAuthID(t *testing.T) {
+	m, f := newExecManager(t)
+	id := config.APIKeyCredentialID(testKey)
+	request := executorRequest{ExecutorRequest: pluginapi.ExecutorRequest{
+		AuthID: id + ".json", AuthProvider: ProviderID, Model: "opencode-go/glm-5.3", SourceFormat: "openai",
+		OriginalRequest: []byte(ccRequestBody), StorageJSON: mustJSON(map[string]string{"type": ProviderID, "id": id}),
+	}}
+	raw, err := m.HandleCall(pluginabi.MethodExecutorExecute, mustJSON(request))
+	if err != nil || !decodeEnv(t, raw).OK {
+		t.Fatalf("filename AuthID reference-only execution failed: err=%v envelope=%s", err, raw)
+	}
+	calls := f.callsOf(pluginabi.MethodHostHTTPDo)
+	if len(calls) != 2 {
+		t.Fatalf("host HTTP calls = %d, want catalog and inference", len(calls))
+	}
+	var wire hostHTTPReq
+	if json.Unmarshal(calls[1].payload, &wire) != nil || wire.Headers.Get("Authorization") != "Bearer "+testKey {
+		t.Fatal("filename AuthID did not use only its matching configured reference")
+	}
+
+	request.AuthID += ".extra"
+	raw, err = m.HandleCall(pluginabi.MethodExecutorExecute, mustJSON(request))
+	env := decodeEnv(t, raw)
+	if err != nil || env.OK || env.Error == nil || !strings.Contains(env.Error.Message, "invalid format") || strings.Contains(string(raw), testKey) {
+		t.Fatalf("non-canonical filename AuthID result = %s err=%v", raw, err)
+	}
+	if got := len(f.callsOf(pluginabi.MethodHostHTTPDo)); got != 2 {
+		t.Fatalf("malformed filename AuthID contacted upstream: host HTTP calls=%d", got)
+	}
+}
+
+func TestRegisterAcceptsCPAAuthIDNormalizedToFilename(t *testing.T) {
+	var f *fakeCaller
+	f = &fakeCaller{responder: func(method string, payload []byte) ([]byte, error) {
+		if method == pluginabi.MethodHostAuthList {
+			var request map[string]any
+			if err := json.Unmarshal(payload, &request); err != nil {
+				return nil, err
+			}
+			response := f.authListResponse()
+			var envelope pluginabi.Envelope
+			if err := json.Unmarshal(response, &envelope); err != nil {
+				return nil, err
+			}
+			var result hostAuthListResponse
+			if err := json.Unmarshal(envelope.Result, &result); err != nil {
+				return nil, err
+			}
+			for i := range result.Files {
+				// CPA 8.1.2 reports the basename (including .json) as Auth.ID,
+				// while the persisted plugin record retains the canonical ID.
+				result.Files[i].ID = result.Files[i].Name
+				result.Files[i].Source = "memory"
+			}
+			return hostOK(result), nil
+		}
+		return catalogResponder(true, testCatalogJSON)(method, payload)
+	}}
+	m := NewManager(NewHostBridge(f.call))
+	t.Cleanup(func() { _, _ = m.HandleCall("plugin.shutdown", nil) })
+	response, err := m.HandleCall("plugin.register", lifecycleRequestBody(testValidYAML))
+	if err != nil {
+		t.Fatalf("register returned transport error: %v", err)
+	}
+	if envelope := decodeEnv(t, response); !envelope.OK {
+		t.Fatalf("register rejected CPA filename AuthID: %+v", envelope.Error)
+	}
+	if len(f.callsOf(pluginabi.MethodHostAuthSave)) != 2 {
+		t.Fatalf("AuthSave calls = %d, want materialization plus catalog revision", len(f.callsOf(pluginabi.MethodHostAuthSave)))
+	}
+}
+
 func TestLifecycleUsesCPAAuthListAfterManagerRestart(t *testing.T) {
 	f := &fakeCaller{responder: catalogResponder(true, testCatalogJSON)}
 	first := NewManager(NewHostBridge(f.call))

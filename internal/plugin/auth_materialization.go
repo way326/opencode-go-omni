@@ -73,7 +73,12 @@ func findMaterializationTarget(entries []pluginapi.HostAuthFileEntry, id, name s
 		if !matchID && !matchName {
 			continue
 		}
-		if !matchID || !matchName {
+		// CPA versions may normalize a file-backed Auth.ID to the filename
+		// instead of preserving the plugin's canonical ID from the JSON body.
+		// A matching filename is only a candidate: migrateOrValidateAuthRecord
+		// must still read the physical file and verify its provider, canonical
+		// ID, and any legacy key before treating it as owned by this plugin.
+		if !matchName {
 			return pluginapi.HostAuthFileEntry{}, false, fmt.Errorf("auth materialization refused: credential id/name collision")
 		}
 		if strings.TrimSpace(entry.AuthIndex) == "" || strings.TrimSpace(entry.Path) == "" || entry.RuntimeOnly || !isOpenCodeGoAuth(entry) {
