@@ -260,9 +260,10 @@ button:focus-visible, a:focus-visible { outline: 3px solid var(--primary-color);
     if (!raw) return "";
     try {
       let decoded = raw;
-      if (raw.startsWith("enc::v1::")) {
+      const usesLegacySeed = raw.startsWith("enc::v1::");
+      if (usesLegacySeed || raw.startsWith("enc::v2::")) {
         const bytes = Uint8Array.from(atob(raw.slice(9)), char => char.charCodeAt(0));
-        const seed = new TextEncoder().encode("cli-proxy-api-webui::secure-storage|" + location.host + "|" + navigator.userAgent);
+        const seed = new TextEncoder().encode("cli-proxy-api-webui::secure-storage|" + location.host + (usesLegacySeed ? "|" + navigator.userAgent : ""));
         for (let i = 0; i < bytes.length; i++) bytes[i] ^= seed[i % seed.length];
         decoded = new TextDecoder().decode(bytes);
       }
