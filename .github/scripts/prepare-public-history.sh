@@ -68,6 +68,7 @@ if [[ -n "${PUBLIC_HISTORY_REPLACEMENTS_FILE:-}" ]]; then
     exit 1
   fi
   filter_args+=(--replace-text "${PUBLIC_HISTORY_REPLACEMENTS_FILE}")
+  filter_args+=(--replace-message "${PUBLIC_HISTORY_REPLACEMENTS_FILE}")
 fi
 
 mapfile -t tags < <(git tag --list)
