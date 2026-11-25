@@ -6,115 +6,161 @@
 <title>OpenCode Go Quota</title>
 <style>
 :root {
-  --bg-primary: #f0eee8;
-  --bg-secondary: #faf9f5;
-  --bg-tertiary: #e9e6df;
-  --text-primary: #2d2a26;
-  --text-secondary: #6d6760;
-  --text-tertiary: #a29c95;
-  --border-color: #e3e1db;
-  --primary-color: #8b8680;
-  --primary-hover: #7f7a74;
-  --success-color: #188038;
-  --warning-color: #b06000;
-  --error-color: #b3261e;
-  --radius-md: 8px;
-  --shadow: 0 1px 3px rgba(45, 42, 38, .12);
+  color-scheme: light;
+  --bg-primary: #fff;
+  --bg-secondary: #f5f7fa;
+  --bg-tertiary: #edf1f5;
+  --text-primary: #1e2937;
+  --text-secondary: #627084;
+  --text-tertiary: #8793a3;
+  --border-color: #e0e6ed;
+  --primary-color: #4d63d9;
+  --primary-hover: #4054c2;
+  --success-color: #16856a;
+  --warning-color: #a95b12;
+  --error-color: #b42318;
+  --radius-md: 12px;
+  --shadow: 0 10px 30px rgba(24, 39, 58, .07);
 }
 [data-theme="white"] {
-  --bg-primary: #f0eee8;
-  --bg-secondary: #faf9f5;
-  --bg-tertiary: #e9e6df;
-  --text-primary: #2d2a26;
-  --text-secondary: #6d6760;
-  --text-tertiary: #a29c95;
-  --border-color: #e3e1db;
+  color-scheme: light;
+  --bg-primary: #fff;
+  --bg-secondary: #f5f7fa;
+  --bg-tertiary: #edf1f5;
+  --text-primary: #1e2937;
+  --text-secondary: #627084;
+  --text-tertiary: #8793a3;
+  --border-color: #e0e6ed;
 }
 [data-theme="dark"] {
-  --bg-primary: #1d1b18;
-  --bg-secondary: #151412;
-  --bg-tertiary: #262320;
-  --text-primary: #f0eee8;
-  --text-secondary: #b8b1a8;
-  --text-tertiary: #8d867e;
-  --border-color: #3c3833;
-  --primary-color: #8f8981;
-  --primary-hover: #a29b92;
-  --shadow: 0 1px 3px rgba(0, 0, 0, .35);
+  color-scheme: dark;
+  --bg-primary: #202733;
+  --bg-secondary: #171d26;
+  --bg-tertiary: #2b3542;
+  --text-primary: #eef2f7;
+  --text-secondary: #acb7c6;
+  --text-tertiary: #8290a2;
+  --border-color: #354150;
+  --primary-color: #a8b5ff;
+  --primary-hover: #bdc7ff;
+  --success-color: #61c5a4;
+  --warning-color: #e4a257;
+  --error-color: #ff8b82;
+  --shadow: 0 10px 30px rgba(0, 0, 0, .2);
 }
 * { box-sizing: border-box; }
 html, body { min-height: 100%; }
-body { margin: 0; padding: 32px; color: var(--text-primary); background: var(--bg-secondary); font: 14px/1.45 system-ui, sans-serif; }
-.quota-page { max-width: 1160px; margin: 0 auto; }
-.quota-header { display: flex; justify-content: flex-start; align-items: center; gap: 96px; margin-bottom: 24px; flex-wrap: wrap; }
-.quota-header-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.quota-btn { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--border-color); border-radius: 8px; padding: 8px 12px; color: var(--text-primary); background: var(--bg-tertiary); font: inherit; font-size: 12px; font-weight: 500; text-decoration: none; cursor: pointer; transition: background .15s, border-color .15s; }
+body { margin: 0; padding: clamp(16px, 3.5vw, 40px); color: var(--text-primary); background: var(--bg-secondary); font: 14px/1.5 system-ui, sans-serif; }
+button, a { -webkit-tap-highlight-color: transparent; }
+button:focus-visible, a:focus-visible { outline: 3px solid var(--primary-color); outline-offset: 2px; }
+.quota-page { max-width: 1120px; margin: 0 auto; }
+.quota-header { display: flex; justify-content: space-between; align-items: flex-end; gap: 24px; margin-bottom: 28px; flex-wrap: wrap; }
+.quota-heading { min-width: 0; }
+.quota-eyebrow { margin: 0 0 7px; color: var(--primary-color); font-size: 11px; font-weight: 750; letter-spacing: .12em; text-transform: uppercase; }
+.quota-header-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.quota-btn { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 38px; border: 1px solid var(--border-color); border-radius: 10px; padding: 8px 13px; color: var(--text-primary); background: var(--bg-primary); font: inherit; font-size: 13px; font-weight: 600; text-decoration: none; cursor: pointer; transition: background .15s, border-color .15s, transform .15s; }
 .quota-btn[hidden] { display: none; }
-.quota-btn:hover { border-color: var(--primary-color); background: var(--bg-primary); }
+.quota-btn:hover { border-color: var(--primary-color); background: var(--bg-tertiary); }
+.quota-btn:active { transform: translateY(1px); }
 .quota-btn:disabled { cursor: not-allowed; opacity: .6; }
-.quota-title { margin: 0; font-size: 28px; font-weight: 700; line-height: 1.2; }
-.quota-description { margin: 8px 0 0; color: var(--text-secondary); }
-.quota-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(380px, 1fr)); gap: 16px; }
-.quota-card { padding: 20px; border: 1px solid var(--border-color); border-radius: var(--radius-md); background: var(--bg-primary); box-shadow: var(--shadow); }
-.quota-card-header { display: flex; align-items: center; gap: 10px; margin-bottom: 18px; }
-.credential-badge { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: 50%; color: #fff; background: var(--primary-color); font-size: 12px; font-weight: 700; }
-.credential-name { margin: 0; min-width: 0; overflow-wrap: anywhere; font-size: 16px; font-weight: 600; }
-.quota-row { padding: 14px 0; border-top: 1px solid var(--border-color); }
-.quota-row-header, .quota-meta { display: flex; justify-content: space-between; gap: 12px; }
-.quota-label { font-weight: 600; text-transform: capitalize; }
-.quota-percent { color: var(--text-secondary); font-variant-numeric: tabular-nums; }
-.quota-track { height: 8px; margin: 8px 0 6px; overflow: hidden; border-radius: 999px; background: var(--bg-tertiary); }
-.quota-fill { height: 100%; border-radius: inherit; background: var(--success-color); transition: width .2s ease; }
-.quota-meta { color: var(--text-secondary); font-size: 12px; }
-.quota-actions { display: flex; align-items: center; gap: 10px; margin-top: 18px; }
-.quota-refresh { border: 1px solid var(--border-color); border-radius: 8px; padding: 8px 10px; color: var(--text-primary); background: var(--bg-tertiary); font: inherit; font-size: 12px; cursor: pointer; }
+.quota-btn-primary { border-color: var(--primary-color); color: #fff; background: var(--primary-color); }
+.quota-btn-primary:hover { border-color: var(--primary-hover); background: var(--primary-hover); }
+[data-theme="dark"] .quota-btn-primary { color: #171d26; }
+.quota-title { margin: 0; font-size: clamp(25px, 3.2vw, 34px); font-weight: 720; letter-spacing: -.035em; line-height: 1.16; }
+.quota-description { margin: 8px 0 0; color: var(--text-secondary); font-size: 14px; }
+.quota-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr)); align-items: start; gap: 16px; }
+.quota-card { width: 100%; max-width: none; padding: clamp(18px, 2.5vw, 26px); border: 1px solid var(--border-color); border-radius: 16px; background: var(--bg-primary); box-shadow: var(--shadow); }
+.quota-card-header { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; }
+.credential-badge { display: inline-flex; flex: 0 0 38px; align-items: center; justify-content: center; width: 38px; height: 38px; border: 1px solid var(--border-color); border-radius: 12px; color: var(--primary-color); background: var(--bg-tertiary); font-size: 12px; font-weight: 750; letter-spacing: .03em; }
+.credential-title-group { min-width: 0; }
+.credential-caption { margin: 0 0 2px; color: var(--text-tertiary); font-size: 11px; font-weight: 650; letter-spacing: .07em; text-transform: uppercase; }
+.credential-name { margin: 0; min-width: 0; overflow-wrap: anywhere; font-family: ui-monospace, monospace; font-size: 14px; font-weight: 650; font-variant-numeric: tabular-nums; letter-spacing: .02em; line-height: 1.35; }
+.quota-periods { border-top: 1px solid var(--border-color); }
+.quota-row { padding: 15px 0; border-bottom: 1px solid var(--border-color); }
+.quota-row-header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.quota-label { font-size: 13px; font-weight: 650; text-transform: capitalize; }
+.quota-percent { color: var(--text-primary); font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.quota-track { display: block; width: 100%; height: 7px; margin: 10px 0 8px; overflow: hidden; appearance: none; border: 0; border-radius: 999px; background: var(--bg-tertiary); color: var(--success-color); }
+.quota-track::-webkit-progress-bar { border-radius: inherit; background: var(--bg-tertiary); }
+.quota-track::-webkit-progress-value { border-radius: inherit; background: var(--success-color); transition: width .2s ease; }
+.quota-track::-moz-progress-bar { border-radius: inherit; background: var(--success-color); transition: width .2s ease; }
+.quota-track.quota-warning::-webkit-progress-value { background: var(--warning-color); }
+.quota-track.quota-warning::-moz-progress-bar { background: var(--warning-color); }
+.quota-track.quota-critical::-webkit-progress-value { background: var(--error-color); }
+.quota-track.quota-critical::-moz-progress-bar { background: var(--error-color); }
+.quota-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 5px 12px; color: var(--text-secondary); font-size: 12px; }
+.quota-status { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; }
+.quota-status::before { width: 6px; height: 6px; border-radius: 50%; background: var(--text-tertiary); content: ""; }
+.quota-actions { display: flex; align-items: center; gap: 10px; margin-top: 16px; }
+.quota-refresh { border: 1px solid var(--border-color); border-radius: 10px; padding: 8px 12px; color: var(--text-primary); background: var(--bg-tertiary); font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; transition: background .15s, border-color .15s; }
 .quota-refresh:hover { border-color: var(--primary-color); background: var(--bg-primary); }
 .quota-refresh:disabled { cursor: not-allowed; opacity: .6; }
+.quota-updated { margin: 15px 0 0; color: var(--text-tertiary); font-size: 11px; }
 .quota-error { color: var(--error-color); }
 .quota-warning { color: var(--warning-color); }
 .quota-muted { color: var(--text-secondary); }
-@media (max-width: 768px) {
-  body { padding: 20px 16px; }
-  .quota-grid { grid-template-columns: 1fr; }
+@media (max-width: 600px) {
+  body { padding: 18px 14px; }
+  .quota-header { align-items: flex-start; margin-bottom: 20px; }
+  .quota-header-actions { width: 100%; }
+  .quota-header-actions .quota-btn { flex: 1 1 auto; }
+  .quota-grid { grid-template-columns: minmax(0, 1fr); }
+  .quota-card { max-width: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; }
 }
 </style>
 </head>
 <body>
 <div class="quota-page">
   <header class="quota-header">
-    <div>
+    <div class="quota-heading">
+      <p id="quota-eyebrow" class="quota-eyebrow">Account overview</p>
       <h1 class="quota-title">OpenCode Go Quota</h1>
-      <p class="quota-description">Usage for each configured credential.</p>
+      <p id="quota-description" class="quota-description">Usage for each configured credential.</p>
     </div>
     <div class="quota-header-actions">
-      <button id="refresh-all-btn" class="quota-btn" hidden>Refresh All</button>
-      <a href="https://github.com/way326/opencode-go-omni" target="_blank" rel="noopener noreferrer" class="quota-btn" aria-label="Star on GitHub">
-        <span aria-hidden="true">&#9733;</span> Star on GitHub
+      <button id="refresh-all-btn" class="quota-btn quota-btn-primary" hidden>Refresh All</button>
+      <a id="star-link" href="https://github.com/way326/opencode-go-omni" target="_blank" rel="noopener noreferrer" class="quota-btn" aria-label="Star on GitHub">
+        <span aria-hidden="true">&#9733;</span> <span id="star-label">Star on GitHub</span>
       </a>
     </div>
   </header>
-  <main id="app"><p class="quota-muted">Loading credentials...</p></main>
+  <main id="app" aria-live="polite"><p class="quota-muted">Loading credentials...</p></main>
 </div>
 <script>
 (() => {
   try {
     const parentDocument = window.parent && window.parent !== window ? window.parent.document : null;
     const parentRoot = parentDocument && parentDocument.documentElement;
-    const syncTheme = () => {
-      if (!parentRoot) return;
-      const theme = parentRoot.getAttribute("data-theme");
-      if (theme === "white" || theme === "dark") document.documentElement.setAttribute("data-theme", theme);
-      else document.documentElement.removeAttribute("data-theme");
-      const secondary = getComputedStyle(parentRoot).getPropertyValue("--bg-secondary").trim();
-      if (secondary) document.documentElement.style.setProperty("--bg-secondary", secondary);
-      document.body.style.backgroundColor = secondary || "var(--bg-secondary)";
-      if (window.frameElement) {
-        window.frameElement.style.backgroundColor = secondary || "transparent";
-        if (window.frameElement.parentElement) window.frameElement.parentElement.style.backgroundColor = secondary || "transparent";
+    const syncParent = () => {
+      if (parentRoot) {
+        const theme = parentRoot.getAttribute("data-theme");
+        if (theme === "white" || theme === "dark") document.documentElement.setAttribute("data-theme", theme);
+        else document.documentElement.removeAttribute("data-theme");
+        const parentLanguage = parentRoot.getAttribute("lang");
+        if (parentLanguage && document.documentElement.lang !== parentLanguage) {
+          document.documentElement.lang = parentLanguage;
+          window.dispatchEvent(new Event("cpa-language-change"));
+        }
+        const secondary = getComputedStyle(parentRoot).getPropertyValue("--bg-secondary").trim();
+        if (secondary) document.documentElement.style.setProperty("--bg-secondary", secondary);
+        document.body.style.backgroundColor = secondary || "var(--bg-secondary)";
+        if (window.frameElement) {
+          window.frameElement.style.backgroundColor = secondary || "transparent";
+          if (window.frameElement.parentElement) window.frameElement.parentElement.style.backgroundColor = secondary || "transparent";
+        }
+      } else {
+        const browserLanguage = navigator.language || "en";
+        if (document.documentElement.lang !== browserLanguage) {
+          document.documentElement.lang = browserLanguage;
+          window.dispatchEvent(new Event("cpa-language-change"));
+        }
       }
     };
-    syncTheme();
-    if (parentRoot) new MutationObserver(syncTheme).observe(parentRoot, {attributes: true, attributeFilter: ["data-theme"]});
+    syncParent();
+    if (parentRoot) new MutationObserver(syncParent).observe(parentRoot, {attributes: true, attributeFilter: ["data-theme", "lang"]});
   } catch (_) {}
 })();
 </script>
@@ -124,10 +170,36 @@ body { margin: 0; padding: 32px; color: var(--text-primary); background: var(--b
   const refreshAllBtn = document.getElementById("refresh-all-btn");
   const endpoint = "__QUOTA_ENDPOINT__";
   const storageKey = "opencode-go-omni:quota";
+  const translations = {
+    en: {
+      pageTitle: "OpenCode Go Quota", overview: "Account overview", description: "Usage for each configured credential.",
+      refreshAll: "Refresh All", refreshing: (current, total) => `Refreshing (${current}/${total})...`,
+      githubStar: "Star on GitHub", loading: "Loading credentials...", noCredentials: "No configured credentials.",
+      rememberPassword: "Enable Remember password in Management Center to use this page.",
+      unableToLoad: "Unable to load credentials.", requestFailed: "Request failed.", quotaRefreshFailed: "Quota refresh failed.",
+      networkError: "Network request failed.", credential: "Credential", rolling: "Rolling", weekly: "Weekly", monthly: "Monthly",
+      quotaUsed: "quota used", used: "used", statusOK: "ok", unknown: "Unknown", resets: "Resets", updated: "Updated",
+      notRefreshed: "Not refreshed", refresh: "Refresh", refreshCredential: "Refresh", usedPercent: value => `${value}% used`
+    },
+    "zh-CN": {
+      pageTitle: "OpenCode Go 额度", overview: "账户总览", description: "查看各凭据的额度使用情况。",
+      refreshAll: "全部刷新", refreshing: (current, total) => `正在刷新（${current}/${total}）…`,
+      githubStar: "在 GitHub 上点星", loading: "正在加载凭据…", noCredentials: "没有已配置的凭据。",
+      rememberPassword: "请在管理中心启用“记住密码”以使用此页面。",
+      unableToLoad: "无法加载凭据。", requestFailed: "请求失败。", quotaRefreshFailed: "额度刷新失败。",
+      networkError: "网络请求失败。", credential: "凭据", rolling: "滚动窗口", weekly: "每周", monthly: "每月",
+      quotaUsed: "额度使用情况", used: "已使用", statusOK: "正常", unknown: "未知", resets: "重置时间", updated: "更新时间",
+      notRefreshed: "尚未刷新", refresh: "刷新", refreshCredential: "刷新", usedPercent: value => `已使用 ${value}%`
+    }
+  };
   const values = new Map();
   const fetchedAt = new Map();
   const cardErrors = new Map();
+  let locale = "en";
   let isRefreshingAll = false;
+  let pageStatus = "loading";
+  let pageError = null;
+  let currentCards = [];
   let cache = {};
   try {
     const stored = sessionStorage.getItem(storageKey);
@@ -139,8 +211,49 @@ body { margin: 0; padding: 32px; color: var(--text-primary); background: var(--b
     values.set(keyID, entry.usage);
     if (typeof entry.fetched_at === "string") fetchedAt.set(keyID, entry.fetched_at);
   });
+  function copy() { return translations[locale]; }
+  function translate(key) { return copy()[key]; }
+  function credentialAccessibleName(label) {
+    return locale === "zh-CN" ? label.replace(/^OpenCode Go credential /, "OpenCode Go 凭据 ") : label;
+  }
   function saveCache() {
     try { sessionStorage.setItem(storageKey, JSON.stringify(cache)); } catch (_) {}
+  }
+  function selectedLanguage() {
+    const language = (document.documentElement.lang || navigator.language || "en").toLowerCase();
+    return language.startsWith("zh") ? "zh-CN" : "en";
+  }
+  function displayError(error) {
+    const message = typeof error?.message === "string" ? error.message.trim() : "";
+    switch (message.toLowerCase()) {
+      case "request failed": return translate("requestFailed");
+      case "quota refresh failed": return translate("quotaRefreshFailed");
+      case "failed to fetch":
+      case "load failed": return translate("networkError");
+      default: return message || translate("quotaRefreshFailed");
+    }
+  }
+  function showStatus(key, error = null) {
+    pageStatus = key;
+    pageError = error;
+    app.textContent = "";
+    const message = document.createElement("p");
+    message.className = key === "rememberPassword" || key === "unableToLoad" ? "quota-error" : "quota-muted";
+    message.setAttribute("role", "status");
+    message.textContent = error ? displayError(error) : translate(key);
+    app.appendChild(message);
+  }
+  function applyLanguage() {
+    locale = selectedLanguage();
+    document.title = translate("pageTitle");
+    document.querySelector(".quota-title").textContent = translate("pageTitle");
+    document.getElementById("quota-eyebrow").textContent = translate("overview");
+    document.getElementById("quota-description").textContent = translate("description");
+    document.getElementById("star-link").setAttribute("aria-label", translate("githubStar"));
+    document.getElementById("star-label").textContent = translate("githubStar");
+    refreshAllBtn.textContent = translate("refreshAll");
+    if (pageStatus) showStatus(pageStatus, pageError);
+    else render(currentCards);
   }
   function auth() {
     const raw = localStorage.getItem("cli-proxy-auth");
@@ -168,43 +281,64 @@ body { margin: 0; padding: 32px; color: var(--text-primary); background: var(--b
       return data;
     });
   }
-  function text(parent, value) { const node = document.createElement("span"); node.textContent = value == null || value === "" ? "-" : value; parent.appendChild(node); }
-  function renderUsage(row, usage) {
-    const value = document.createElement("div"); value.className = "quota-percent";
-    const track = document.createElement("div"); track.className = "quota-track";
-    const fill = document.createElement("div"); fill.className = "quota-fill";
+  function formatTimestamp(value) {
+    if (typeof value !== "string" || value === "") return "-";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return value;
+    return date.toLocaleString(locale, {year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit"});
+  }
+  function displayStatus(value) {
+    if (typeof value !== "string" || !value) return translate("unknown");
+    return value.toLowerCase() === "ok" ? translate("statusOK") : value;
+  }
+  function renderUsage(row, rowHeader, name, usage) {
+    const track = document.createElement("progress"); track.className = "quota-track"; track.max = 100;
     const percent = Math.max(0, Math.min(100, Number(usage.percent) || 0));
-    fill.style.width = percent + "%";
-    track.setAttribute("role", "progressbar"); track.setAttribute("aria-valuemin", "0"); track.setAttribute("aria-valuemax", "100"); track.setAttribute("aria-valuenow", String(percent)); track.setAttribute("aria-label", "Quota used"); track.appendChild(fill);
-    value.textContent = percent + "%";
-    const meta = document.createElement("div"); meta.className = "quota-meta"; text(meta, usage.status + " · resets " + usage.resets_at);
-    row.append(value, track, meta);
+    track.value = percent;
+    if (percent >= 95) track.classList.add("quota-critical");
+    else if (percent >= 80) track.classList.add("quota-warning");
+    track.setAttribute("aria-valuetext", copy().usedPercent(percent)); track.setAttribute("aria-label", translate(name) + " " + translate("quotaUsed"));
+    const value = document.createElement("span"); value.className = "quota-percent"; value.textContent = percent + "%"; rowHeader.appendChild(value);
+    const meta = document.createElement("div"); meta.className = "quota-meta";
+    const status = document.createElement("span"); status.className = "quota-status"; status.textContent = displayStatus(usage.status);
+    const resetsAt = document.createElement("time"); resetsAt.textContent = translate("resets") + " " + formatTimestamp(usage.resets_at);
+    if (typeof usage.resets_at === "string" && !Number.isNaN(new Date(usage.resets_at).getTime())) resetsAt.dateTime = usage.resets_at;
+    meta.append(status, resetsAt);
+    row.append(track, meta);
   }
   function render(cards) {
-    if (refreshAllBtn) refreshAllBtn.hidden = cards.length === 0;
+    currentCards = cards;
+    if (refreshAllBtn) { refreshAllBtn.hidden = cards.length === 0; refreshAllBtn.disabled = isRefreshingAll; }
+    if (!cards.length) { showStatus("noCredentials"); return; }
+    pageStatus = "";
+    pageError = null;
     app.textContent = "";
-    if (!cards.length) { const p = document.createElement("p"); p.className = "quota-muted"; p.setAttribute("role", "status"); p.textContent = "No configured credentials."; app.appendChild(p); return; }
     const grid = document.createElement("div"); grid.className = "quota-grid";
     cards.forEach(card => {
+      const labelText = typeof card.label === "string" ? card.label : translate("credential");
       const section = document.createElement("section"); section.className = "quota-card";
       const header = document.createElement("div"); header.className = "quota-card-header";
       const badge = document.createElement("span"); badge.className = "credential-badge"; badge.textContent = "OG"; badge.setAttribute("aria-hidden", "true");
-      const title = document.createElement("h2"); title.className = "credential-name"; title.textContent = card.label; header.append(badge, title); section.appendChild(header);
+      const titleGroup = document.createElement("div"); titleGroup.className = "credential-title-group";
+      const caption = document.createElement("p"); caption.className = "credential-caption"; caption.textContent = translate("credential");
+      const title = document.createElement("h2"); title.className = "credential-name"; title.textContent = labelText.replace(/^OpenCode Go credential /, ""); title.title = credentialAccessibleName(labelText); title.setAttribute("aria-label", credentialAccessibleName(labelText)); titleGroup.append(caption, title); header.append(badge, titleGroup); section.appendChild(header);
+      const periods = document.createElement("div"); periods.className = "quota-periods";
       ["rolling", "weekly", "monthly"].forEach(name => {
         const row = document.createElement("div"); row.className = "quota-row";
-        const rowHeader = document.createElement("div"); rowHeader.className = "quota-row-header"; const label = document.createElement("span"); label.className = "quota-label"; label.textContent = name; rowHeader.appendChild(label); row.appendChild(rowHeader);
+        const rowHeader = document.createElement("div"); rowHeader.className = "quota-row-header"; const label = document.createElement("span"); label.className = "quota-label"; label.textContent = translate(name); rowHeader.appendChild(label); row.appendChild(rowHeader);
         const usage = values.get(card.key_id) && values.get(card.key_id)[name];
-        if (usage) renderUsage(row, usage); else { const pending = document.createElement("div"); pending.className = "quota-meta"; pending.textContent = "Not refreshed"; row.appendChild(pending); }
-        section.appendChild(row);
+        if (usage) renderUsage(row, rowHeader, name, usage); else { const pending = document.createElement("div"); pending.className = "quota-meta"; pending.textContent = translate("notRefreshed"); row.appendChild(pending); }
+        periods.appendChild(row);
       });
+      section.appendChild(periods);
       const updated = fetchedAt.get(card.key_id);
-      if (updated) { const timestamp = document.createElement("div"); timestamp.className = "quota-meta"; timestamp.textContent = "Updated " + new Date(updated).toLocaleString(); section.appendChild(timestamp); }
+      if (updated) { const timestamp = document.createElement("p"); timestamp.className = "quota-updated"; const time = document.createElement("time"); time.dateTime = updated; time.textContent = translate("updated") + " " + formatTimestamp(updated); timestamp.appendChild(time); section.appendChild(timestamp); }
       const actions = document.createElement("div"); actions.className = "quota-actions";
-      const button = document.createElement("button"); button.className = "quota-refresh"; button.textContent = "Refresh"; button.setAttribute("aria-label", "Refresh " + card.label);
+      const button = document.createElement("button"); button.className = "quota-refresh"; button.textContent = translate("refresh"); button.setAttribute("aria-label", translate("refreshCredential") + " " + credentialAccessibleName(labelText));
       if (isRefreshingAll) button.disabled = true;
       const error = document.createElement("span"); error.className = "quota-error"; error.setAttribute("role", "status");
-      if (cardErrors.has(card.key_id)) error.textContent = cardErrors.get(card.key_id);
-      button.onclick = () => { button.disabled = true; error.textContent = ""; cardErrors.delete(card.key_id); request({key_id: card.key_id}).then(result => { const timestamp = new Date().toISOString(); values.set(card.key_id, result.usage); fetchedAt.set(card.key_id, timestamp); cache[card.key_id] = {usage: result.usage, fetched_at: timestamp}; saveCache(); render(cards); }).catch(err => { const msg = err.message || "Refresh failed"; cardErrors.set(card.key_id, msg); error.textContent = msg; button.disabled = false; }); };
+      if (cardErrors.has(card.key_id)) error.textContent = displayError(cardErrors.get(card.key_id));
+      button.onclick = () => { button.disabled = true; error.textContent = ""; cardErrors.delete(card.key_id); request({key_id: card.key_id}).then(result => { const timestamp = new Date().toISOString(); values.set(card.key_id, result.usage); fetchedAt.set(card.key_id, timestamp); cache[card.key_id] = {usage: result.usage, fetched_at: timestamp}; saveCache(); render(cards); }).catch(err => { cardErrors.set(card.key_id, err); error.textContent = displayError(err); button.disabled = false; }); };
       actions.append(button, error); section.appendChild(actions); grid.appendChild(section);
     });
     app.appendChild(grid);
@@ -220,7 +354,7 @@ body { margin: 0; padding: 32px; color: var(--text-primary); background: var(--b
         try {
           for (let i = 0; i < cards.length; i++) {
             const card = cards[i];
-            refreshAllBtn.textContent = "Refreshing (" + (i + 1) + "/" + cards.length + ")...";
+            refreshAllBtn.textContent = copy().refreshing(i + 1, cards.length);
             try {
               const result = await request({key_id: card.key_id});
               const timestamp = new Date().toISOString();
@@ -231,7 +365,7 @@ body { margin: 0; padding: 32px; color: var(--text-primary); background: var(--b
               cardErrors.delete(card.key_id);
               render(cards);
             } catch (err) {
-              cardErrors.set(card.key_id, err.message || "Refresh failed");
+              cardErrors.set(card.key_id, err);
               render(cards);
             }
             if (i < cards.length - 1) {
@@ -241,14 +375,16 @@ body { margin: 0; padding: 32px; color: var(--text-primary); background: var(--b
         } finally {
           isRefreshingAll = false;
           render(cards);
-          refreshAllBtn.textContent = "Refresh All";
+          refreshAllBtn.textContent = translate("refreshAll");
           refreshAllBtn.disabled = false;
         }
       };
     }
   }
-  if (!auth()) { app.textContent = ""; const p = document.createElement("p"); p.className = "quota-error"; p.setAttribute("role", "status"); p.textContent = "Enable Remember password in Management Center to use this page."; app.appendChild(p); return; }
-  request({}).then(result => { const cards = result.cards || []; const configured = new Set(cards.map(card => card.key_id)); Object.keys(cache).forEach(keyID => { if (!configured.has(keyID)) { delete cache[keyID]; values.delete(keyID); fetchedAt.delete(keyID); } }); saveCache(); render(cards); }).catch(err => { app.textContent = ""; const p = document.createElement("p"); p.className = "quota-error"; p.setAttribute("role", "status"); p.textContent = err.message || "Unable to load credentials."; app.appendChild(p); });
+  window.addEventListener("cpa-language-change", applyLanguage);
+  applyLanguage();
+  if (!auth()) { showStatus("rememberPassword"); return; }
+  request({}).then(result => { const cards = result.cards || []; const configured = new Set(cards.map(card => card.key_id)); Object.keys(cache).forEach(keyID => { if (!configured.has(keyID)) { delete cache[keyID]; values.delete(keyID); fetchedAt.delete(keyID); } }); saveCache(); render(cards); }).catch(err => showStatus("unableToLoad", err));
 })();
 </script>
 </body>
