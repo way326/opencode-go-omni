@@ -10,7 +10,7 @@ OpenCode Go Omni 是面向 [CLIProxyAPI（CPA）](https://github.com/router-for-
 - Anthropic Messages
 - Google Gemini GenerateContent
 
-**当前稳定版本：[v0.2.3](https://github.com/way326/opencode-go-omni/releases/tag/v0.2.3)。** 请按操作系统和架构下载对应的 Release 压缩包。
+**源码版本：`0.2.4`。最新已发布版本：[v0.2.3](https://github.com/way326/opencode-go-omni/releases/tag/v0.2.3)。** 请按操作系统和架构下载对应的 Release 压缩包。
 
 > 不要同时启用本插件和原版 `opencode-go-cliproxyapi` 插件。两者注册相同的 `opencode-go` 提供方。
 
@@ -20,13 +20,14 @@ OpenCode Go Omni 是面向 [CLIProxyAPI（CPA）](https://github.com/router-for-
 - **一个提供方支持四种协议。** 客户端使用 CPA 标准 API 端点；插件根据模型选择已配置的上游协议。
 - **按模型目录路由。** 读取模型目录及协议元数据，并支持针对特定模型配置显式路由。目录中出现某个模型只表示它具备路由资格，不保证上游账号当前一定可用。
 - **多凭据池。** 每个 OpenCode Go Key 与其 CPA 凭据身份精确绑定；凭据调度和健康状态由 CPA 管理。
-- **配额查询。** 实现 CPA 原生配额提供方，并提供独立的 OpenCode Go Quota 页面，可按凭据手动刷新滚动、每周和每月用量。
+- **统一管理页。** CPA 管理菜单只提供一个 OpenCode Go Omni 页面，默认展示额度；页面内的“设置”按钮切换到插件设置表单。
+- **配额查询。** 实现 CPA 原生配额提供方，可按凭据手动刷新滚动、每周和每月用量。
 - **协议转换与流式处理。** 提供跨协议转换、会话亲和及流式完成状态保护。
 - **Codex Multi-Agent V2。** 支持规范化处理符合要求的明文 Agent 消息；加密或未知格式会被拒绝，不会尝试解密或静默丢弃。
 
 ## 环境要求
 
-- 支持原生插件的 CLIProxyAPI v8。v0.2.3 曾在隔离的官方 CLIProxyAPI v8.1.2 环境中进行冒烟验收；这不代表已覆盖所有 CPA 构建版本。
+- 支持原生插件的 CLIProxyAPI v8。
 - OpenCode Go 订阅 API Key。
 - 本插件不提供 OAuth 登录流程。
 
@@ -37,6 +38,7 @@ OpenCode Go Omni 是面向 [CLIProxyAPI（CPA）](https://github.com/router-for-
 3. 将下方配置合并到 CPA 的 `config.yaml`，并确认插件已启用。
 4. 保持原版 `opencode-go-cliproxyapi` 插件禁用。请按当前 CPA 安装方式加载或刷新插件。
 5. 客户端连接 CPA 的常规 API 地址并使用 CPA 客户端 API Key。启用模型前缀时，模型 ID 形如 `opencode-go/<模型名>`。
+6. 使用 `0.2.4` 源码构建的插件加载后，可在 Management Center 的插件菜单打开 **OpenCode Go Omni**；主页先显示额度，点击页面内的“设置”按钮调整参数。管理中心须已登录并启用“记住密码”。
 
 仅构建本项目不会自动安装插件，也不会启用或修改正在运行的 CPA。
 
@@ -55,6 +57,7 @@ plugins:
       base-url: "https://opencode.ai/inference/go/v1"
       api-keys:
         - value: "${OPENCODE_GO_API_KEY}"
+          remark: "主账号" # 可选；额度页优先显示此备注
       model-prefix:
         enabled: true
         value: "opencode-go"
@@ -73,11 +76,17 @@ plugins:
 
 在 CPA 进程可访问的环境中设置 `OPENCODE_GO_API_KEY`，再按部署方式启动或重新加载 CPA。建议使用环境变量引用，避免把真实 Key 写进配置文件。
 
+### WebUI 表单
+
+插件加载后会在 CPA Management Center 注册单一的 **OpenCode Go Omni** 页面：额度是默认视图，点击页内“设置”进入设置视图，并可返回额度。设置表单覆盖上游地址、模型目录、路由覆盖、超时/响应限制、协议开关、模型前缀和 API Key 列表。保存时调用 CPA 的插件配置管理 API，由 CPA 写回自身配置并重新加载插件；本插件不自行写磁盘，也不需要手工导出 YAML。插件启用/停用仍由 CPA 插件管理界面控制。
+
+页面通过 CPA 已认证的插件配置接口读取当前 Key；每项默认掩码，可单独编辑备注、显示密钥、隐藏密钥、编辑 Key、删除或新增，保存时只在 Key 列表有改动时写回。备注优先作为额度页上的凭据名称；没有备注时仍显示 Key 的短哈希标识。保存 Key/备注后，页面会轮询额度列表，等待 CPA 的异步插件重载应用备注，再自动刷新凭据卡片。页面不把 Key 存入浏览器本地存储，但已授权的浏览器可在开发者工具/网络请求中检查这些值。新增 Key 时优先使用 `${ENV_VAR}`，并确保对应变量存在于 CPA 进程环境中；直接输入的 Key 会以明文保存到 `config.yaml`。请只在可信的本机或 HTTPS 管理会话中使用此功能。插件注册时也会发布 `ConfigFields` 元数据；CPA 自带的通用插件配置表单是否显示这些字段由 Management Center 前端版本决定，WebUI 设置页则由插件提供。
+
 | 配置项 | 说明 |
 | --- | --- |
 | `base-url` | OpenCode Go API 根地址；默认值为 `https://opencode.ai/inference/go/v1`。 |
 | `catalog-url` | 可选的模型目录地址；默认使用 `{base-url}/models`。 |
-| `api-keys` | 一个或多个上游订阅 Key，由 CPA 管理凭据调度。 |
+| `api-keys` | 一个或多个上游订阅 Key，由 CPA 管理凭据调度。每项支持可选 `remark`，用于在额度页显示易读的凭据名称。 |
 | `model-prefix` | 控制客户端看到的模型 ID 前缀，常用值为 `opencode-go/`。 |
 | `protocols` | 分别启用或关闭 Chat Completions、Messages、Responses 和 Gemini 协议。 |
 | `catalog.refresh-interval` | 模型目录刷新间隔。 |
@@ -107,7 +116,7 @@ plugins:
 
 ## 配额
 
-CPA 原生配额集成会使用所选凭据请求 `GET {base-url}/usage`，并保留上游提供的重置时间。独立的 **OpenCode Go Quota** 页面首次加载只列出已配置的凭据，不会自动请求上游；只有手动刷新时才查询对应凭据。两种配额路径都会校验滚动、每周和每月窗口；数据缺失或格式错误时返回错误，不会误报为零用量。当前不支持重置配额。
+CPA 原生配额集成会使用所选凭据请求 `GET {base-url}/usage`，并保留上游提供的重置时间。**OpenCode Go Omni** 主页首次加载只列出已配置的凭据，不会自动请求上游；只有手动刷新时才查询对应凭据。两种配额路径都会校验滚动、每周和每月窗口；数据缺失或格式错误时返回错误，不会误报为零用量。当前不支持重置配额。
 
 ## 会话与协议行为
 

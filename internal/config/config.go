@@ -62,6 +62,9 @@ const (
 type APIKey struct {
 	// Value is the resolved runtime key. It must never be serialized or logged.
 	Value string `json:"-" yaml:"-"`
+	// Remark is a user-supplied display name and is safe to persist in the
+	// plugin configuration. It is intentionally omitted from runtime JSON.
+	Remark string `json:"-" yaml:"-"`
 	// Source and Ref are safe diagnostics. Ref is populated only when the
 	// entire configured value is exactly ${ENV_VAR}; mixed values retain no text.
 	Source       APIKeySource `json:"source" yaml:"-"`
@@ -144,7 +147,8 @@ type rawPrefix struct {
 }
 
 type rawKey struct {
-	Value string `yaml:"value"`
+	Value  string `yaml:"value"`
+	Remark string `yaml:"remark"`
 }
 
 type rawCatalog struct {
@@ -178,6 +182,7 @@ func Load(yamlBytes []byte) (Config, error) {
 	keys := make([]APIKey, len(raw.APIKeys))
 	for i, k := range raw.APIKeys {
 		keys[i] = loadAPIKey(k.Value)
+		keys[i].Remark = k.Remark
 	}
 	refreshInterval, err := parseDuration("catalog.refresh-interval", raw.Catalog.RefreshInterval, DefaultRefreshInterval)
 	if err != nil {

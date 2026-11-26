@@ -22,7 +22,7 @@ const ProviderID = "opencode-go"
 // pluginName / pluginVersion are reported in registration metadata.
 const (
 	pluginName    = "opencode-go-omni"
-	pluginVersion = "0.2.3"
+	pluginVersion = "0.2.4"
 )
 
 // githubRepoURL satisfies the host's validPlugin gate (host.go
@@ -212,7 +212,7 @@ func pluginConfigFields() []pluginapi.ConfigField {
 		{
 			Name:        "api-keys",
 			Type:        pluginapi.ConfigFieldTypeArray,
-			Description: "List of OpenCode Go API keys (`- value: ...`). Supports ${ENV_VAR}; prefer environment references over literal values.",
+			Description: "Sensitive OpenCode Go keys (`- value: ...`, optional `remark: ...`). Supports ${ENV_VAR}; prefer environment references because literal values are stored in CPA config.yaml.",
 		},
 		{
 			Name:        "base-url",
@@ -314,7 +314,7 @@ func (m *Manager) registerManagement(request []byte) ([]byte, error) {
 			Path        string `json:"path"`
 			Menu        string `json:"menu"`
 			Description string `json:"description"`
-		}{{Path: "/quota", Menu: "OpenCode Go Quota", Description: "View OpenCode Go quota windows."}},
+		}{{Path: "/quota", Menu: "OpenCode Go Omni", Description: "View quota and configure OpenCode Go plugin settings."}},
 	}), nil
 }
 
