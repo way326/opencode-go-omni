@@ -1,0 +1,61 @@
+<section class="settings-view">
+  <header class="settings-header">
+    <div>
+      <p class="settings-eyebrow">Plugin configuration</p>
+      <h1>OpenCode Go Settings</h1>
+      <p class="settings-intro">在此编辑本插件设置和 OpenCode Go 凭据。保存由 CPA 管理接口写回插件配置，并触发重新加载。</p>
+    </div>
+    <button id="settings-back" class="settings-button" type="button">← 返回额度</button>
+  </header>
+  <p id="settings-status" class="settings-status" role="status" aria-live="polite">正在读取配置…</p>
+  <form id="settings-form" hidden>
+    <section class="settings-section">
+      <h2>基本设置</h2>
+      <p class="settings-section-note">这些设置会保存至 CPA 的插件配置中。</p>
+      <div class="settings-grid">
+        <div class="settings-field"><label for="base-url">上游 Base URL</label><input id="base-url" type="text" autocomplete="url"><p class="settings-help">默认：https://opencode.ai/inference/go/v1</p></div>
+        <div class="settings-field"><label for="catalog-url">模型目录 URL</label><input id="catalog-url" type="text" autocomplete="url"><p class="settings-help">留空时使用 Base URL 加 /models。</p></div>
+        <div class="settings-field"><label for="request-timeout">请求时间预算</label><input id="request-timeout" type="text" placeholder="5m"><p class="settings-help">Go duration 格式，例如 30s、5m、1h。</p></div>
+        <div class="settings-field"><label for="max-response-bytes">最大非流式响应（字节）</label><input id="max-response-bytes" type="number" min="1" step="1"><p class="settings-help">默认 67108864（64 MiB）。</p></div>
+        <div class="settings-field settings-full"><label for="route-overrides">模型路由覆盖（JSON 对象）</label><textarea id="route-overrides" spellcheck="false" autocomplete="off"></textarea><p class="settings-help">按模型 ID 配置协议和端点；可留空或输入 {}。示例：{"model-id":{"protocol":"chat-completions","endpoint":"/chat/completions"}}</p></div>
+      </div>
+    </section>
+    <section class="settings-section">
+      <h2>模型与协议</h2>
+      <p class="settings-section-note">关闭模型前缀后，客户端使用无前缀的模型 ID。</p>
+      <div class="settings-grid">
+        <div class="settings-field"><label class="settings-check"><input id="prefix-enabled" type="checkbox"><span>启用模型 ID 前缀</span></label></div>
+        <div class="settings-field"><label for="prefix-value">模型前缀</label><input id="prefix-value" type="text" placeholder="opencode-go"></div>
+        <div class="settings-field settings-full"><span class="settings-field-label">可用协议</span><div class="settings-checks">
+          <label class="settings-check"><input id="protocol-chat" type="checkbox"><span>OpenAI Chat Completions</span></label>
+          <label class="settings-check"><input id="protocol-messages" type="checkbox"><span>Anthropic Messages</span></label>
+          <label class="settings-check"><input id="protocol-responses" type="checkbox"><span>OpenAI Responses</span></label>
+          <label class="settings-check"><input id="protocol-gemini" type="checkbox"><span>Google Gemini</span></label>
+        </div></div>
+      </div>
+    </section>
+    <section class="settings-section">
+      <h2>模型目录</h2>
+      <div class="settings-grid">
+        <div class="settings-field"><label for="refresh-interval">刷新间隔</label><input id="refresh-interval" type="text" placeholder="15m"><p class="settings-help">至少 1 分钟，例如 15m 或 1h。</p></div>
+        <div class="settings-field"><label class="settings-check"><input id="stale-enabled" type="checkbox"><span>上游不可用时保留上次有效目录</span></label></div>
+      </div>
+    </section>
+    <section class="settings-section">
+      <h2>OpenCode Go API Keys</h2>
+      <p class="settings-section-note">为每个 Key 添加备注，可逐条编辑、显示密钥、隐藏密钥、删除或新增；额度页优先使用备注作为凭据名称。</p>
+      <div id="key-list" class="settings-key-list"></div>
+      <button id="add-key" class="settings-button" type="button">新增 Key</button>
+      <p class="settings-help">可以直接输入 Key，也可以输入完整的 <code>${ENV_VAR}</code> 引用；使用环境变量时，CPA 进程必须能读取对应变量。</p>
+      <p class="settings-danger-note">此页面会通过已认证的 CPA 配置接口读取当前 Key；值默认掩码，但管理员可点击“显示密钥”查看，且浏览器开发者工具可检查页面/网络请求。直接输入的 Key 将以明文写入 CPA 的 config.yaml。页面不会将 Key 写入浏览器本地存储；请仅在可信本机或 HTTPS 管理会话中使用。</p>
+    </section>
+    <section class="settings-section">
+      <h2>安全与访问</h2>
+      <div class="settings-checks">
+        <label class="settings-check"><input id="allow-http" type="checkbox"><span>允许明文 HTTP（仅限本地测试）</span></label>
+      </div>
+      <p class="settings-help">正式上游请求应使用 HTTPS。插件启用/停用仍由 CPA 的插件管理界面控制。</p>
+    </section>
+    <div class="settings-form-actions"><button id="save-settings" class="settings-button settings-button-primary" type="submit">保存设置</button><span class="settings-help">CPA 会保存配置并异步重新加载插件。</span></div>
+  </form>
+</section>

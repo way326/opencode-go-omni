@@ -159,7 +159,7 @@ func TestLoadRejectsKeysThatNormalizeToTheSameExecutionValue(t *testing.T) {
 
 func TestAPIKeyMetadataAndCredentialID(t *testing.T) {
 	t.Setenv("TEST_OG_ENV_KEY", "expanded-secret")
-	doc := "api-keys:\n  - value: sk-dummy\n  - value: ${TEST_OG_ENV_KEY}\n"
+	doc := "api-keys:\n  - value: sk-dummy\n    remark: Primary account\n  - value: ${TEST_OG_ENV_KEY}\n    remark: Backup account\n"
 	c, err := Load([]byte(doc))
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
@@ -168,6 +168,9 @@ func TestAPIKeyMetadataAndCredentialID(t *testing.T) {
 		t.Fatalf("APIKeys length = %d, want 2", len(c.APIKeys))
 	}
 	literal, env := c.APIKeys[0], c.APIKeys[1]
+	if literal.Remark != "Primary account" || env.Remark != "Backup account" {
+		t.Fatalf("remarks = %q, %q", literal.Remark, env.Remark)
+	}
 	if literal.Source != APIKeySourceLiteral || literal.Ref != "" {
 		t.Fatalf("literal source metadata = %+v", literal)
 	}

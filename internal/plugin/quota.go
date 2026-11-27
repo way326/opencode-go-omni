@@ -59,6 +59,14 @@ func quotaIdentity(key string) (id, label string) {
 	return id, "OpenCode Go credential " + hash[:12]
 }
 
+func quotaLabel(key, remark string) string {
+	if remark = strings.TrimSpace(remark); remark != "" {
+		return remark
+	}
+	_, label := quotaIdentity(key)
+	return label
+}
+
 func (m *Manager) HandleManagement(ctx context.Context, req pluginapi.ManagementRequest) (pluginapi.ManagementResponse, error) {
 	// CPA v8 exposes versioned management routes; keep the legacy v0 alias
 	// usable for existing management clients and the inherited tests.
@@ -96,7 +104,7 @@ func (m *Manager) HandleManagement(ctx context.Context, req pluginapi.Management
 			if !ok {
 				continue
 			}
-			_, label := quotaIdentity(binding.key)
+			label := quotaLabel(binding.key, key.Remark)
 			cards = append(cards, quotaCard{KeyID: id, Label: label})
 		}
 		return quotaJSON(quotaList{Cards: cards})
@@ -113,7 +121,7 @@ func (m *Manager) HandleManagement(ctx context.Context, req pluginapi.Management
 		if !ok {
 			return pluginapi.ManagementResponse{StatusCode: http.StatusNotFound, Body: []byte(`{"error":"unknown quota key"}`)}, nil
 		}
-		_, label := quotaIdentity(binding.key)
+		label := quotaLabel(binding.key, key.Remark)
 		usage, err := fetchQuota(ctx, m.bridge, binding.cfg.BaseURL, binding.cfg.RequestTimeout, binding.key)
 		if err != nil {
 			return pluginapi.ManagementResponse{StatusCode: http.StatusBadGateway, Body: []byte(`{"error":"quota refresh failed"}`)}, nil
@@ -131,8 +139,16 @@ func quotaPageResponse(version string) (pluginapi.ManagementResponse, error) {
 	nonce := base64.RawURLEncoding.EncodeToString(nonceBytes)
 
 	page := strings.ReplaceAll(resources.QuotaPage, "__QUOTA_ENDPOINT__", version+"/management/plugins/"+pluginName+"/quota-usage")
+	page = strings.ReplaceAll(page, "__SETTINGS_FORM__", resources.SettingsForm)
+	page = strings.ReplaceAll(page, "__SETTINGS_STYLES__", resources.SettingsStyles)
+	page = strings.ReplaceAll(page, "__SETTINGS_SCRIPT__", resources.SettingsScript)
 	if strings.Count(page, "<script>") != 2 || strings.Count(page, "<style>") != 1 {
 		return pluginapi.ManagementResponse{}, fmt.Errorf("quota page inline resource shape changed")
+	}
+	for _, placeholder := range []string{"__QUOTA_ENDPOINT__", "__SETTINGS_FORM__", "__SETTINGS_STYLES__", "__SETTINGS_SCRIPT__"} {
+		if strings.Contains(page, placeholder) {
+			return pluginapi.ManagementResponse{}, fmt.Errorf("quota page placeholder %s was not materialized", placeholder)
+		}
 	}
 	page = strings.ReplaceAll(page, "<script>", `<script nonce="`+nonce+`">`)
 	page = strings.ReplaceAll(page, "<style>", `<style nonce="`+nonce+`">`)

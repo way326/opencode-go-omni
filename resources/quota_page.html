@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OpenCode Go Quota</title>
+<title>OpenCode Go Omni</title>
 <style>
 :root {
   color-scheme: light;
@@ -110,24 +110,29 @@ button:focus-visible, a:focus-visible { outline: 3px solid var(--primary-color);
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; }
 }
+__SETTINGS_STYLES__
 </style>
 </head>
 <body>
 <div class="quota-page">
+  <div id="quota-view">
   <header class="quota-header">
     <div class="quota-heading">
-      <p id="quota-eyebrow" class="quota-eyebrow">Account overview</p>
-      <h1 class="quota-title">OpenCode Go Quota</h1>
+      <p id="quota-eyebrow" class="quota-eyebrow">Quota overview</p>
+      <h1 class="quota-title">OpenCode Go Omni</h1>
       <p id="quota-description" class="quota-description">Usage for each configured credential.</p>
     </div>
     <div class="quota-header-actions">
       <button id="refresh-all-btn" class="quota-btn quota-btn-primary" hidden>Refresh All</button>
+      <button id="settings-btn" class="quota-btn" type="button">Settings</button>
       <a id="star-link" href="https://github.com/way326/opencode-go-omni" target="_blank" rel="noopener noreferrer" class="quota-btn" aria-label="Star on GitHub">
         <span aria-hidden="true">&#9733;</span> <span id="star-label">Star on GitHub</span>
       </a>
     </div>
   </header>
   <main id="app" aria-live="polite"><p class="quota-muted">Loading credentials...</p></main>
+  </div>
+  <div id="settings-view" hidden>__SETTINGS_FORM__</div>
 </div>
 <script>
 (() => {
@@ -168,11 +173,15 @@ button:focus-visible, a:focus-visible { outline: 3px solid var(--primary-color);
 (() => {
   const app = document.getElementById("app");
   const refreshAllBtn = document.getElementById("refresh-all-btn");
+  const settingsBtn = document.getElementById("settings-btn");
+  const quotaView = document.getElementById("quota-view");
+  const settingsView = document.getElementById("settings-view");
   const endpoint = "__QUOTA_ENDPOINT__";
   const storageKey = "opencode-go-omni:quota";
   const translations = {
     en: {
-      pageTitle: "OpenCode Go Quota", overview: "Account overview", description: "Usage for each configured credential.",
+      pageTitle: "OpenCode Go Omni", overview: "Quota overview", description: "Quota usage for each configured credential.",
+      settings: "Settings", backToQuota: "← Back to quota",
       refreshAll: "Refresh All", refreshing: (current, total) => `Refreshing (${current}/${total})...`,
       githubStar: "Star on GitHub", loading: "Loading credentials...", noCredentials: "No configured credentials.",
       rememberPassword: "Enable Remember password in Management Center to use this page.",
@@ -182,7 +191,8 @@ button:focus-visible, a:focus-visible { outline: 3px solid var(--primary-color);
       notRefreshed: "Not refreshed", refresh: "Refresh", refreshCredential: "Refresh", usedPercent: value => `${value}% used`
     },
     "zh-CN": {
-      pageTitle: "OpenCode Go 额度", overview: "账户总览", description: "查看各凭据的额度使用情况。",
+      pageTitle: "OpenCode Go Omni", overview: "额度总览", description: "查看各凭据的额度使用情况。",
+      settings: "设置", backToQuota: "← 返回额度",
       refreshAll: "全部刷新", refreshing: (current, total) => `正在刷新（${current}/${total}）…`,
       githubStar: "在 GitHub 上点星", loading: "正在加载凭据…", noCredentials: "没有已配置的凭据。",
       rememberPassword: "请在管理中心启用“记住密码”以使用此页面。",
@@ -200,6 +210,7 @@ button:focus-visible, a:focus-visible { outline: 3px solid var(--primary-color);
   let pageStatus = "loading";
   let pageError = null;
   let currentCards = [];
+  let quotaRefreshSequence = 0;
   let cache = {};
   try {
     const stored = sessionStorage.getItem(storageKey);
@@ -252,6 +263,8 @@ button:focus-visible, a:focus-visible { outline: 3px solid var(--primary-color);
     document.getElementById("star-link").setAttribute("aria-label", translate("githubStar"));
     document.getElementById("star-label").textContent = translate("githubStar");
     refreshAllBtn.textContent = translate("refreshAll");
+    settingsBtn.textContent = translate("settings");
+    document.getElementById("settings-back").textContent = translate("backToQuota");
     if (pageStatus) showStatus(pageStatus, pageError);
     else render(currentCards);
   }
@@ -382,6 +395,40 @@ button:focus-visible, a:focus-visible { outline: 3px solid var(--primary-color);
       };
     }
   }
+  window.refreshQuotaCredentials = async expectedRemarks => {
+    const sequence = ++quotaRefreshSequence;
+    const remarks = expectedRemarks && Array.isArray(expectedRemarks.remarks) ? expectedRemarks.remarks.map(value => typeof value === "string" ? value.trim() : "") : [];
+    const previousRemarks = expectedRemarks && Array.isArray(expectedRemarks.previousRemarks) ? expectedRemarks.previousRemarks.map(value => typeof value === "string" ? value.trim() : "") : [];
+    for (let attempt = 0; attempt < 24; attempt++) {
+      try {
+        const result = await request({});
+        const cards = Array.isArray(result.cards) ? result.cards : [];
+        const namesReady = cards.length === remarks.length && remarks.every((remark, index) => remark ? cards[index]?.label === remark : !previousRemarks[index] || cards[index]?.label !== previousRemarks[index]);
+        if (sequence !== quotaRefreshSequence) return false;
+        if (namesReady) {
+          const configured = new Set(cards.map(card => card.key_id));
+          Object.keys(cache).forEach(keyID => { if (!configured.has(keyID)) { delete cache[keyID]; values.delete(keyID); fetchedAt.delete(keyID); } });
+          saveCache();
+          render(cards);
+          return true;
+        }
+      } catch (_) {
+        if (sequence !== quotaRefreshSequence) return false;
+      }
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+    return false;
+  };
+  __SETTINGS_SCRIPT__
+  settingsBtn.addEventListener("click", () => {
+    quotaView.hidden = true;
+    settingsView.hidden = false;
+    window.initializeSettingsPanel();
+  });
+  document.getElementById("settings-back").addEventListener("click", () => {
+    settingsView.hidden = true;
+    quotaView.hidden = false;
+  });
   window.addEventListener("cpa-language-change", applyLanguage);
   applyLanguage();
   if (!auth()) { showStatus("rememberPassword"); return; }

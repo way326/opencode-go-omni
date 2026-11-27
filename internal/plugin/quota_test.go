@@ -24,7 +24,7 @@ func TestManagementRegistration(t *testing.T) {
 	if len(got.Routes) != 1 || got.Routes[0].Method != http.MethodPost || got.Routes[0].Path != "/plugins/"+pluginName+"/quota-usage" {
 		t.Fatalf("routes = %+v", got.Routes)
 	}
-	if len(got.Resources) != 1 || got.Resources[0].Path != "/quota" || got.Resources[0].Menu != "OpenCode Go Quota" {
+	if len(got.Resources) != 1 || got.Resources[0].Path != "/quota" || got.Resources[0].Menu != "OpenCode Go Omni" {
 		t.Fatalf("resources = %+v", got.Resources)
 	}
 	var registration registrationResult
@@ -37,7 +37,7 @@ func TestManagementRegistration(t *testing.T) {
 func TestQuotaListDoesNotCallHost(t *testing.T) {
 	f := &fakeCaller{}
 	m := NewManager(NewHostBridge(f.call))
-	installQuotaTestConfig(t, m, config.Config{APIKeys: []config.APIKey{{Value: "quota-key-a"}, {Value: "quota-key-b"}}})
+	installQuotaTestConfig(t, m, config.Config{APIKeys: []config.APIKey{{Value: "quota-key-a", Remark: "Personal account"}, {Value: "quota-key-b"}}})
 	var got quotaList
 	resp, err := m.HandleManagement(context.Background(), pluginapi.ManagementRequest{Method: http.MethodPost, Path: "/v0/management/plugins/" + pluginName + "/quota-usage", Body: []byte(`{}`)})
 	if err != nil {
@@ -46,11 +46,17 @@ func TestQuotaListDoesNotCallHost(t *testing.T) {
 	if err := json.Unmarshal(resp.Body, &got); err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Cards) != 2 || got.Cards[0].Label != "OpenCode Go credential "+mustHashPrefix("quota-key-a") || got.Cards[1].Label != "OpenCode Go credential "+mustHashPrefix("quota-key-b") {
+	if len(got.Cards) != 2 || got.Cards[0].Label != "Personal account" || got.Cards[1].Label != "OpenCode Go credential "+mustHashPrefix("quota-key-b") {
 		t.Fatalf("cards = %+v", got.Cards)
 	}
 	if strings.Contains(string(resp.Body), "quota-key-") || len(f.callsOf(pluginabi.MethodHostHTTPDo)) != 0 {
 		t.Fatalf("list leaked key or called upstream: %s calls=%v", resp.Body, f.callsOf(pluginabi.MethodHostHTTPDo))
+	}
+}
+
+func TestQuotaLabelFallsBackWhenRemarkIsEmpty(t *testing.T) {
+	if got, want := quotaLabel("quota-key", "  \t "), "OpenCode Go credential "+mustHashPrefix("quota-key"); got != want {
+		t.Fatalf("quotaLabel() = %q, want %q", got, want)
 	}
 }
 
@@ -71,7 +77,7 @@ func TestQuotaRefresh(t *testing.T) {
 		return hostOK(pluginapi.HTTPResponse{StatusCode: http.StatusOK, Body: []byte(`{"usage":{"rolling":{"status":"ok","percent":9,"resetsAt":"2026-09-05T12:20:04Z"},"weekly":{"status":"ok","percent":12,"resetsAt":"2026-09-10T00:00:00Z"},"monthly":{"status":"ok","percent":6,"resetsAt":"2026-10-01T00:00:00Z"}}}`)}), nil
 	}}
 	m := NewManager(NewHostBridge(f.call))
-	installQuotaTestConfig(t, m, config.Config{BaseURL: "https://quota.test/v1/", RequestTimeout: config.DefaultRequestTimeout, APIKeys: []config.APIKey{{Value: key}}})
+	installQuotaTestConfig(t, m, config.Config{BaseURL: "https://quota.test/v1/", RequestTimeout: config.DefaultRequestTimeout, APIKeys: []config.APIKey{{Value: key, Remark: "Personal account"}}})
 	id, _ := quotaIdentity(key)
 	resp, err := m.HandleManagement(context.Background(), pluginapi.ManagementRequest{Method: http.MethodPost, Path: "/v0/management/plugins/" + pluginName + "/quota-usage", Body: []byte(`{"key_id":"` + id + `"}`)})
 	if err != nil {
@@ -81,7 +87,7 @@ func TestQuotaRefresh(t *testing.T) {
 	if err := json.Unmarshal(resp.Body, &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Usage == nil || got.Usage.Rolling.Percent != 9 || got.Usage.Weekly.ResetsAt != "2026-09-10T00:00:00Z" || got.Usage.Monthly.Percent != 6 {
+	if got.Label != "Personal account" || got.Usage == nil || got.Usage.Rolling.Percent != 9 || got.Usage.Weekly.ResetsAt != "2026-09-10T00:00:00Z" || got.Usage.Monthly.Percent != 6 {
 		t.Fatalf("usage = %+v", got.Usage)
 	}
 }
@@ -97,7 +103,7 @@ func TestQuotaUnknownKeyAndResource(t *testing.T) {
 		t.Fatalf("unknown response = %+v err=%v calls=%v", resp, err, f.callsOf(pluginabi.MethodHostHTTPDo))
 	}
 	resource, err := m.HandleManagement(context.Background(), pluginapi.ManagementRequest{Method: http.MethodGet, Path: "/v0/resource/plugins/" + pluginName + "/quota"})
-	if err != nil || resource.StatusCode != 0 || resource.Headers.Get("Content-Type") != "text/html; charset=utf-8" || !strings.Contains(string(resource.Body), "OpenCode Go Quota") || strings.Contains(string(resource.Body), key) {
+	if err != nil || resource.StatusCode != 0 || resource.Headers.Get("Content-Type") != "text/html; charset=utf-8" || !strings.Contains(string(resource.Body), "OpenCode Go Omni") || strings.Contains(string(resource.Body), key) {
 		t.Fatalf("resource response = %+v err=%v", resource, err)
 	}
 }
@@ -226,7 +232,7 @@ func TestQuotaPageUsesNativeQuotaStylesAndThemeBridge(t *testing.T) {
 		`weekly: "每周"`,
 		`monthly: "每月"`,
 		`resets: "重置时间"`,
-		`pageTitle: "OpenCode Go 额度"`,
+		`pageTitle: "OpenCode Go Omni"`,
 		`document.documentElement.lang`,
 		`parentRoot.getAttribute("lang")`,
 		`attributeFilter: ["data-theme", "lang"]`,

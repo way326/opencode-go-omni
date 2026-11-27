@@ -11,6 +11,8 @@ plugins:
       api-keys:
         # Prefer an environment reference; do not commit or paste literal keys here.
         - value: "${OPENCODE_GO_API_KEY}"
+          # Optional display name shown on the quota page.
+          remark: "Primary account"
       model-prefix:
         enabled: true
         value: "opencode-go"

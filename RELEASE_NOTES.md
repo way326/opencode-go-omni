@@ -1,5 +1,25 @@
 # Release Notes
 
+## 0.2.4 (unreleased)
+
+### Unified Management Center page
+
+- Combine quota and settings under one OpenCode Go Omni resource. Quota is the
+  default view; an in-page settings button opens the plugin settings form.
+- Keep route overrides, protocol switches and per-key add/edit/delete/reveal
+  actions in the settings view.
+- Let each upstream Key carry an optional remark; use it as the quota-card name
+  before falling back to the existing short credential fingerprint. Align the
+  key fields and controls and use explicit “显示密钥” / “隐藏密钥” actions.
+- Load key values only through CPA's authenticated plugin-config endpoint;
+  mask them by default and do not persist them in browser storage. Authorized
+  admins can inspect values through the UI and browser developer tools.
+- Persist edits through CPA's authenticated plugin-config management API and
+  rely on CPA's configuration reload/reconfigure flow rather than plugin-owned
+  disk writes.
+- Poll the quota list and refresh card names after CPA's asynchronous plugin
+  reconfigure applies saved key remarks. Align checkboxes with adjacent fields.
+
 ## 0.2.3 - 2026-11-25
 
 ### CLIProxyAPI 8.1.2 compatibility
