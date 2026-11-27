@@ -43,7 +43,8 @@
     </section>
     <section class="settings-section">
       <h2>OpenCode Go API Keys</h2>
-      <p class="settings-section-note">为每个 Key 添加备注，可逐条编辑、显示密钥、隐藏密钥、删除或新增；额度页优先使用备注作为凭据名称。</p>
+      <p class="settings-section-note">为每个 Key 添加备注，可逐条编辑、显示密钥、隐藏密钥、从本插件配置移除或新增；额度页优先使用备注作为凭据名称。</p>
+      <p class="settings-help">“从配置移除”只修改本插件的 Key 配置，不会删除 CPA 已生成的 Auth 记录，也不会撤销上游 Key。保存设置后，请在 CPA 凭据管理中核对并停用或移除对应的旧 Auth 记录。</p>
       <div id="key-list" class="settings-key-list"></div>
       <button id="add-key" class="settings-button" type="button">新增 Key</button>
       <p class="settings-help">可以直接输入 Key，也可以输入完整的 <code>${ENV_VAR}</code> 引用；使用环境变量时，CPA 进程必须能读取对应变量。</p>

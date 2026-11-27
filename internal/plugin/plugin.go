@@ -3,6 +3,7 @@ package plugin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -32,9 +33,17 @@ const githubRepoURL = "https://github.com/way326/opencode-go-omni"
 // registerRefreshTimeout bounds ONLY the synchronous initial/reconfigure
 // refreshOnce so a slow catalog cannot block host startup/reconfigure for a
 // full request-timeout (default 15m). On expiry registration proceeds per
-// FR-002 empty/stale semantics; the ticker retries at refresh-interval with
-// the full request-timeout.
+// FR-002 empty/stale semantics; the refresh loop retries failures with a
+// bounded backoff before resuming the configured refresh interval.
 const registerRefreshTimeout = 10 * time.Second
+
+// Catalog refresh failures should be retried well before the normal catalog
+// interval. Retry cadence is bounded to avoid turning a persistent outage into
+// a high-frequency request loop.
+var (
+	catalogRetryInitialDelay = 5 * time.Second
+	catalogRetryMaxDelay     = 5 * time.Minute
+)
 
 // Manager owns dispatcher state (config snapshot, catalog manager, refresh
 // loop) and routes every RPC method. Safe for concurrent HandleCall use.
@@ -309,7 +318,10 @@ func (m *Manager) registerManagement(request []byte) ([]byte, error) {
 		Routes: []struct {
 			Method string `json:"method"`
 			Path   string `json:"path"`
-		}{{Method: "POST", Path: "/plugins/" + pluginName + "/quota-usage"}},
+		}{
+			{Method: "POST", Path: "/plugins/" + pluginName + "/quota-usage"},
+			{Method: "GET", Path: "/plugins/" + pluginName + "/catalog-diagnostics"},
+		},
 		Resources: []struct {
 			Path        string `json:"path"`
 			Menu        string `json:"menu"`
@@ -397,7 +409,7 @@ func (m *Manager) handleLifecycleAdmitted(request []byte, epoch uint64) ([]byte,
 	m.mu.RLock()
 	previousMgr := m.mgr
 	m.mu.RUnlock()
-	if cfg.Catalog.StaleWhileUnavailable && previousMgr != nil && len(previousMgr.Models()) > 0 {
+	if cfg.Catalog.StaleWhileUnavailable && previousMgr != nil {
 		mgr.SeedFrom(previousMgr)
 	}
 	candidateCredentials, err := buildCredentialDirectory(cfg, mgr)
@@ -421,7 +433,7 @@ func (m *Manager) handleLifecycleAdmitted(request []byte, epoch uint64) ([]byte,
 	if m.authSync != nil {
 		m.authSync.mu.Unlock()
 	}
-	refreshErr := refreshOnce(context.Background(), mgr, m.bridge, registerRefreshTimeout, cfg)
+	refreshErr := refreshOnce(context.Background(), mgr, m.bridge, registerRefreshTimeout)
 	debugTrace("lifecycle refresh_complete model_count=%d refresh_error=%t", len(mgr.Models()), refreshErr != nil)
 
 	// Retire any running loop and wait for its exit outside m.mu: a mid-refresh
@@ -434,7 +446,7 @@ func (m *Manager) handleLifecycleAdmitted(request []byte, epoch uint64) ([]byte,
 	m.mu.Lock()
 	m.cfg = cfg
 	// FR-002 stale-while-unavailable: a failed refresh must neither wipe a
-	// non-empty previous snapshot nor keep the OLD manager, whose stored cfg
+	// previous snapshot nor keep the OLD manager, whose stored cfg
 	// would pin the old base-url/catalog-url/protocols/prefix so ticks
 	// fetched the old URL with the new config's keys forever (F5). The NEW
 	// manager is adopted unconditionally; when a previous snapshot exists
@@ -444,7 +456,7 @@ func (m *Manager) handleLifecycleAdmitted(request []byte, epoch uint64) ([]byte,
 	// (stale-while-unavailable:false) no seed happens — same as the ticker
 	// failure path — so a reconfigure during an outage serves nothing until
 	// a refresh succeeds, honoring the operator's policy on BOTH paths.
-	if refreshErr != nil && cfg.Catalog.StaleWhileUnavailable && m.mgr != nil && len(m.mgr.Models()) > 0 {
+	if refreshErr != nil && cfg.Catalog.StaleWhileUnavailable && m.mgr != nil {
 		mgr.SeedFrom(m.mgr)
 	}
 	m.mgr = mgr
@@ -465,7 +477,7 @@ func (m *Manager) handleLifecycleAdmitted(request []byte, epoch uint64) ([]byte,
 	interval := cfg.Catalog.RefreshInterval
 	m.mu.Unlock()
 
-	m.startRefreshLoop(cfg, mgr, interval, stop, done)
+	m.startRefreshLoop(cfg, mgr, interval, stop, done, refreshErr != nil)
 	return registrationEnvelope(), nil
 }
 
@@ -640,11 +652,11 @@ func (m *Manager) markShutdownComplete() {
 	m.rpcMu.Unlock()
 }
 
-// startRefreshLoop spawns the single background ticker goroutine over the
+// startRefreshLoop spawns the single background refresh goroutine over the
 // caller-supplied stop/done pair (already stored under m.mu) and the served
 // catalog manager. The loop captures its own cfg/mgr/bridge snapshot so
 // it never contends on m.mu; reconfigure swaps state and restarts the loop.
-func (m *Manager) startRefreshLoop(cfg config.Config, mgr *catalog.Manager, interval time.Duration, stop, done chan struct{}) {
+func (m *Manager) startRefreshLoop(cfg config.Config, mgr *catalog.Manager, interval time.Duration, stop, done chan struct{}, initialRefreshFailed bool) {
 	// F4: tick refresh contexts derive from stopCtx so close(stop) aborts
 	// an in-flight Refresh immediately instead of leaving lifeMu held until
 	// the old config's request-timeout expires. The watcher goroutine is
@@ -656,29 +668,63 @@ func (m *Manager) startRefreshLoop(cfg config.Config, mgr *catalog.Manager, inte
 		cancel()
 	}()
 	go func() {
-		ticker := time.NewTicker(interval)
+		retryDelay := catalogRetryInitialDelay
+		nextDelay := interval
+		retrying := initialRefreshFailed
+		if retrying {
+			nextDelay = retryDelay
+		}
+		timer := time.NewTimer(nextDelay)
 		defer close(done)
-		defer ticker.Stop()
+		defer timer.Stop()
 		defer cancel()
 		for {
 			select {
 			case <-stop:
 				return
-			case <-ticker.C:
+			case <-timer.C:
+				var refreshErr error
 				func() {
 					defer func() {
 						// CGO bridge calls can panic; a tick must never
 						// take the host process down.
-						if r := recover(); r != nil && m.bridge != nil {
-							_ = m.bridge.Log("error", "catalog refresh panicked", nil)
+						if r := recover(); r != nil {
+							refreshErr = errors.New("catalog refresh panicked")
+							if m.bridge != nil {
+								_ = m.bridge.Log("error", "catalog refresh panicked", nil)
+							}
 						}
 					}()
-					refreshOnce(stopCtx, mgr, m.bridge, cfg.RequestTimeout, cfg)
+					refreshErr = refreshOnce(stopCtx, mgr, m.bridge, cfg.RequestTimeout)
 					m.syncCatalogRevision(stopCtx, mgr)
 				}()
+				if refreshErr != nil {
+					if retrying {
+						retryDelay = nextCatalogRetryDelay(retryDelay)
+					} else {
+						retryDelay = catalogRetryInitialDelay
+					}
+					retrying = true
+					nextDelay = retryDelay
+				} else {
+					retrying = false
+					retryDelay = catalogRetryInitialDelay
+					nextDelay = interval
+				}
+				timer.Reset(nextDelay)
 			}
 		}
 	}()
+}
+
+func nextCatalogRetryDelay(current time.Duration) time.Duration {
+	if current <= 0 {
+		return catalogRetryInitialDelay
+	}
+	if current >= catalogRetryMaxDelay/2 {
+		return catalogRetryMaxDelay
+	}
+	return current * 2
 }
 
 // syncCatalogRevision derives a revision from the final served projection and
@@ -717,25 +763,40 @@ func (m *Manager) closeStop() chan struct{} {
 	return done
 }
 
-// refreshOnce runs one bounded catalog refresh. Catalog refresh is not a client
-// request, so the fallback uses the first configured key only and has no client
-// selection, rotation, cooldown, or retry state. parent bounds-and-cancels
-// the attempt: the lifecycle path passes context.Background() plus
-// registerRefreshTimeout; ticker ticks pass the loop's stop-derived context
-// plus the full request-timeout, so close(stop) aborts an in-flight tick
-// (F4). On failure it logs a warn via host.log — error text is a redacted
-// category label from the catalog package, never key material (FR-011).
-func refreshOnce(parent context.Context, mgr *catalog.Manager, bridge *HostBridge, timeout time.Duration, cfg config.Config) error {
-	// Fallback: configured materialization input is catalog-only; CPA client
-	// authentication remains owned by its AuthProvider and CPA.
+// refreshOnce runs one bounded catalog refresh. Since catalog discovery is
+// shared and is not a client inference request, it may try another configured
+// discovery key only after an explicit 401/403 response. Execution credentials
+// remain bound to CPA's selected Auth. parent bounds-and-cancels the attempt:
+// lifecycle passes registerRefreshTimeout; ticker retries use request-timeout
+// and a stop-derived context. Failure logs contain only redacted categories and
+// attempt counts, never key material (FR-011).
+func refreshOnce(parent context.Context, mgr *catalog.Manager, bridge *HostBridge, timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
-	err := mgr.Refresh(ctx, cfg.APIKeys[0].Value)
-	if err != nil {
-		if bridge != nil {
-			_ = bridge.Log("warn", "catalog refresh failed", map[string]any{"error": err.Error()})
-		}
+	attempts, err := mgr.RefreshConfigured(ctx)
+	if bridge == nil {
 		return err
+	}
+	if err != nil {
+		diagnostics := mgr.Diagnostics()
+		modelCount := diagnostics.RoutableCount
+		message := "catalog refresh failed"
+		if diagnostics.Stale && modelCount > 0 {
+			message = "catalog refresh failed; serving stale catalog"
+		} else if modelCount == 0 {
+			message = "catalog refresh failed; no routable models available"
+		}
+		_ = bridge.Log("warn", message, map[string]any{
+			"error":           err.Error(),
+			"attempts":        attempts,
+			"routable_models": modelCount,
+			"stale_snapshot":  diagnostics.Stale,
+		})
+		return err
+	}
+	if attempts > 1 {
+		_ = bridge.Log("info", "catalog refresh succeeded with a later configured key",
+			map[string]any{"attempts": attempts})
 	}
 	// FR-010: surface normalization diagnostics with the post-refresh log.
 	warnings := mgr.Warnings()

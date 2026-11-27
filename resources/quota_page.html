@@ -99,6 +99,14 @@ button:focus-visible, a:focus-visible { outline: 3px solid var(--primary-color);
 .quota-error { color: var(--error-color); }
 .quota-warning { color: var(--warning-color); }
 .quota-muted { color: var(--text-secondary); }
+.quota-diagnostics { margin: 0 0 18px; border: 1px solid var(--border-color); border-radius: 12px; background: var(--bg-primary); color: var(--text-secondary); font-size: 12px; }
+.quota-diagnostics summary { padding: 12px 15px; color: var(--text-primary); font-weight: 650; cursor: pointer; }
+.quota-diagnostics-content { display: grid; gap: 8px; padding: 0 15px 14px; }
+.quota-diagnostics-content p { margin: 0; }
+.quota-diagnostics-content details { padding-top: 7px; border-top: 1px solid var(--border-color); }
+.quota-diagnostics-content details summary { padding: 5px 0; font-size: 12px; }
+.quota-diagnostics-list { display: grid; gap: 5px; max-height: 230px; margin: 3px 0 0; padding: 0 0 0 18px; overflow: auto; overflow-wrap: anywhere; }
+.quota-diagnostics-error { color: var(--error-color); }
 @media (max-width: 600px) {
   body { padding: 18px 14px; }
   .quota-header { align-items: flex-start; margin-bottom: 20px; }
@@ -130,6 +138,10 @@ __SETTINGS_STYLES__
       </a>
     </div>
   </header>
+  <details id="catalog-diagnostics" class="quota-diagnostics">
+    <summary id="catalog-diagnostics-title">Catalog and route diagnostics</summary>
+    <div id="catalog-diagnostics-content" class="quota-diagnostics-content"><p class="quota-muted">Loading catalog diagnostics...</p></div>
+  </details>
   <main id="app" aria-live="polite"><p class="quota-muted">Loading credentials...</p></main>
   </div>
   <div id="settings-view" hidden>__SETTINGS_FORM__</div>
@@ -177,11 +189,18 @@ __SETTINGS_STYLES__
   const quotaView = document.getElementById("quota-view");
   const settingsView = document.getElementById("settings-view");
   const endpoint = "__QUOTA_ENDPOINT__";
+  const diagnosticsEndpoint = "__DIAGNOSTICS_ENDPOINT__";
+  const diagnosticsContent = document.getElementById("catalog-diagnostics-content");
   const storageKey = "opencode-go-omni:quota";
   const translations = {
     en: {
       pageTitle: "OpenCode Go Omni", overview: "Quota overview", description: "Quota usage for each configured credential.",
       settings: "Settings", backToQuota: "← Back to quota",
+      diagnostics: "Catalog and route diagnostics", diagnosticsLoading: "Loading catalog diagnostics...",
+      diagnosticsUnavailable: "Catalog diagnostics unavailable.", catalogStatus: "Catalog status", noSnapshot: "No catalog snapshot available", lastSuccess: "Last success",
+      lastFailure: "Last failure", lastError: "Last failure category", routableModels: "Routable models",
+      staleSnapshot: "Serving stale snapshot", currentSnapshot: "Current snapshot", modelRoutes: "Routable model routes",
+      excludedModels: "Excluded models", routeWarnings: "Route warnings", noItems: "None", missingModelID: "(missing model ID)",
       refreshAll: "Refresh All", refreshing: (current, total) => `Refreshing (${current}/${total})...`,
       githubStar: "Star on GitHub", loading: "Loading credentials...", noCredentials: "No configured credentials.",
       rememberPassword: "Enable Remember password in Management Center to use this page.",
@@ -193,6 +212,11 @@ __SETTINGS_STYLES__
     "zh-CN": {
       pageTitle: "OpenCode Go Omni", overview: "额度总览", description: "查看各凭据的额度使用情况。",
       settings: "设置", backToQuota: "← 返回额度",
+      diagnostics: "目录与路由诊断", diagnosticsLoading: "正在加载目录诊断…",
+      diagnosticsUnavailable: "目录诊断暂不可用。", catalogStatus: "目录状态", noSnapshot: "当前没有目录快照", lastSuccess: "最近成功",
+      lastFailure: "最近失败", lastError: "最近失败类别", routableModels: "可路由模型",
+      staleSnapshot: "当前使用旧快照", currentSnapshot: "当前目录快照", modelRoutes: "可路由模型路由",
+      excludedModels: "被排除模型", routeWarnings: "路由告警", noItems: "无", missingModelID: "（缺少模型 ID）",
       refreshAll: "全部刷新", refreshing: (current, total) => `正在刷新（${current}/${total}）…`,
       githubStar: "在 GitHub 上点星", loading: "正在加载凭据…", noCredentials: "没有已配置的凭据。",
       rememberPassword: "请在管理中心启用“记住密码”以使用此页面。",
@@ -210,6 +234,9 @@ __SETTINGS_STYLES__
   let pageStatus = "loading";
   let pageError = null;
   let currentCards = [];
+  let diagnosticsData = null;
+  let diagnosticsStatus = "diagnosticsLoading";
+  let diagnosticsSequence = 0;
   let quotaRefreshSequence = 0;
   let cache = {};
   try {
@@ -265,6 +292,9 @@ __SETTINGS_STYLES__
     refreshAllBtn.textContent = translate("refreshAll");
     settingsBtn.textContent = translate("settings");
     document.getElementById("settings-back").textContent = translate("backToQuota");
+    document.getElementById("catalog-diagnostics-title").textContent = translate("diagnostics");
+    if (diagnosticsData) renderCatalogDiagnostics(diagnosticsData);
+    else showDiagnosticsStatus(diagnosticsStatus);
     if (pageStatus) showStatus(pageStatus, pageError);
     else render(currentCards);
   }
@@ -294,6 +324,69 @@ __SETTINGS_STYLES__
       if (!response.ok) throw new Error(data.error || "Request failed");
       return data;
     });
+  }
+  function showDiagnosticsStatus(status) {
+    diagnosticsData = null;
+    diagnosticsStatus = status;
+    const message = document.createElement("p");
+    message.className = status === "diagnosticsUnavailable" ? "quota-diagnostics-error" : "quota-muted";
+    message.textContent = translate(status);
+    diagnosticsContent.replaceChildren(message);
+  }
+  async function loadCatalogDiagnostics() {
+    const sequence = ++diagnosticsSequence;
+    const key = auth();
+    if (!key) { showDiagnosticsStatus("rememberPassword"); return; }
+    showDiagnosticsStatus("diagnosticsLoading");
+    try {
+      const response = await fetch(diagnosticsEndpoint, {headers: {"Accept": "application/json", "Authorization": "Bearer " + key}});
+      if (!response.ok) throw new Error("diagnostics request failed");
+      const data = await response.json();
+      if (typeof data?.has_snapshot !== "boolean") throw new Error("invalid diagnostics response");
+      if (sequence === diagnosticsSequence) renderCatalogDiagnostics(data);
+    } catch (_) {
+      if (sequence === diagnosticsSequence) showDiagnosticsStatus("diagnosticsUnavailable");
+    }
+  }
+  function renderCatalogDiagnostics(data) {
+    diagnosticsData = data;
+    diagnosticsContent.replaceChildren();
+    const addLine = (label, value, className = "") => {
+      const line = document.createElement("p");
+      line.textContent = label + ": " + value;
+      if (className) line.className = className;
+      diagnosticsContent.appendChild(line);
+    };
+    const routeCount = Number(data.routable_count) || 0;
+    const snapshotState = data.stale ? translate("staleSnapshot") : data.has_snapshot ? translate("currentSnapshot") : translate("noSnapshot");
+    addLine(translate("catalogStatus"), snapshotState + " · " + translate("routableModels") + ": " + routeCount);
+    addLine(translate("lastSuccess"), formatTimestamp(data.last_success));
+    addLine(translate("lastFailure"), formatTimestamp(data.last_failure));
+    if (data.last_failure_category) addLine(translate("lastError"), String(data.last_failure_category), "quota-diagnostics-error");
+    const addList = (title, items, format) => {
+      const details = document.createElement("details");
+      const summary = document.createElement("summary");
+      summary.textContent = title + " (" + items.length + ")";
+      const list = document.createElement("ul");
+      list.className = "quota-diagnostics-list";
+      if (items.length) items.forEach(item => {
+        const entry = document.createElement("li");
+        entry.textContent = format(item);
+        list.appendChild(entry);
+      });
+      else {
+        const entry = document.createElement("li");
+        entry.textContent = translate("noItems");
+        list.appendChild(entry);
+      }
+      details.append(summary, list);
+      diagnosticsContent.appendChild(details);
+    };
+    addList(translate("modelRoutes"), Array.isArray(data.models) ? data.models : [], model =>
+      model.client_id + " (" + model.upstream_id + ") — " + model.protocol + " · " + model.route_source);
+    addList(translate("excludedModels"), Array.isArray(data.excluded) ? data.excluded : [], model =>
+      (model.upstream_id || translate("missingModelID")) + " — " + model.reason);
+    addList(translate("routeWarnings"), Array.isArray(data.warnings) ? data.warnings : [], warning => String(warning));
   }
   function formatTimestamp(value) {
     if (typeof value !== "string" || value === "") return "-";
@@ -428,9 +521,11 @@ __SETTINGS_STYLES__
   document.getElementById("settings-back").addEventListener("click", () => {
     settingsView.hidden = true;
     quotaView.hidden = false;
+    loadCatalogDiagnostics();
   });
   window.addEventListener("cpa-language-change", applyLanguage);
   applyLanguage();
+  loadCatalogDiagnostics();
   if (!auth()) { showStatus("rememberPassword"); return; }
   request({}).then(result => { const cards = result.cards || []; const configured = new Set(cards.map(card => card.key_id)); Object.keys(cache).forEach(keyID => { if (!configured.has(keyID)) { delete cache[keyID]; values.delete(keyID); fetchedAt.delete(keyID); } }); saveCache(); render(cards); }).catch(err => showStatus("unableToLoad", err));
 })();

@@ -1,6 +1,9 @@
 package catalog
 
 import (
+	"context"
+	"encoding/json"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -54,6 +57,9 @@ func TestUpstreamMetadataRoutesNewFamilies(t *testing.T) {
 	if chat.PublicID != "opencode-go/future-chat" || chat.DisplayName != "Future Chat" {
 		t.Errorf("future-chat identity = %+v", chat)
 	}
+	if chat.RouteSource != "upstream_metadata" {
+		t.Errorf("future-chat route source = %q, want upstream_metadata", chat.RouteSource)
+	}
 	if chat.ContextLimit != 1000000 || chat.OutputLimit != 65536 {
 		t.Errorf("future-chat limits = context %d output %d", chat.ContextLimit, chat.OutputLimit)
 	}
@@ -63,6 +69,12 @@ func TestUpstreamMetadataRoutesNewFamilies(t *testing.T) {
 	gemini := findModel(t, models, "future-gemini")
 	if gemini.EndpointPath != "/v1/models/future-gemini:generateContent" {
 		t.Errorf("future-gemini endpoint = %q", gemini.EndpointPath)
+	}
+	if got := findModel(t, models, "qwen3.6-plus").RouteSource; got != "exact_compatibility" {
+		t.Errorf("qwen3.6-plus route source = %q, want exact_compatibility", got)
+	}
+	if got := findModel(t, models, "glm-legacy").RouteSource; got != "family_fallback" {
+		t.Errorf("glm-legacy route source = %q, want family_fallback", got)
 	}
 
 	unsupported := make(map[string]string)
@@ -82,5 +94,64 @@ func TestUpstreamMetadataRoutesNewFamilies(t *testing.T) {
 	}
 	if unsupported["iceman-contributor-free"] != unavailableModels["iceman-contributor-free"] {
 		t.Errorf("iceman reason = %q", unsupported["iceman-contributor-free"])
+	}
+	if got := strings.Join(m.Warnings(), "\n"); !strings.Contains(got, "route conflict for \"qwen3.6-plus\"") {
+		t.Errorf("warnings = %q, want explicit exact-rule/upstream-metadata conflict", got)
+	}
+}
+
+func TestDiagnosticsReportRefreshStateAndRoutingWithoutSecrets(t *testing.T) {
+	fc := &fakeClient{resp: pluginapi.HTTPResponse{StatusCode: 200, Body: []byte(`{"data":[{"id":"future-chat","recommended_api":"chat-completions"},{"id":"embed-only","recommended_api":"embeddings"}]}`)}}
+	m := newManager(testCfg(), fc)
+	mustRefresh(t, m)
+	d := m.Diagnostics()
+	if d.LastSuccess == nil || d.LastFailure != nil || d.Stale || d.LastFailureCategory != "" {
+		t.Fatalf("successful diagnostics = %+v", d)
+	}
+	if d.RoutableCount != 1 || len(d.Models) != 1 || d.Models[0].RouteSource != "upstream_metadata" {
+		t.Fatalf("routable diagnostics = %+v", d)
+	}
+	if len(d.Excluded) != 1 || d.Excluded[0].UpstreamID != "embed-only" {
+		t.Fatalf("excluded diagnostics = %+v", d.Excluded)
+	}
+	fc.set(pluginapi.HTTPResponse{StatusCode: http.StatusUnauthorized}, nil)
+	if err := m.Refresh(context.Background(), testKey); err == nil {
+		t.Fatal("Refresh after 401 unexpectedly succeeded")
+	}
+	d = m.Diagnostics()
+	if d.LastSuccess == nil || d.LastFailure == nil || !d.Stale || d.LastFailureCategory != "http 401" || d.RoutableCount != 1 {
+		t.Fatalf("stale diagnostics = %+v", d)
+	}
+	encoded, err := json.Marshal(d)
+	if err != nil {
+		t.Fatalf("marshal diagnostics: %v", err)
+	}
+	if strings.Contains(string(encoded), testKey) || strings.Contains(string(encoded), "Authorization") {
+		t.Fatalf("diagnostics contain credential material: %s", encoded)
+	}
+	fc.set(pluginapi.HTTPResponse{StatusCode: 200, Body: []byte(`{"data":[{"id":"future-chat","recommended_api":"chat-completions"}]}`)}, nil)
+	mustRefresh(t, m)
+	d = m.Diagnostics()
+	if !d.HasSnapshot || d.Stale || d.LastFailureCategory != "http 401" || d.LastFailure == nil {
+		t.Fatalf("recovered diagnostics should retain most-recent failure history without stale state: %+v", d)
+	}
+}
+
+func TestSeedFromKeepsNewConfigurationFailureWithEmptySnapshot(t *testing.T) {
+	prev := newManager(testCfg(), &fakeClient{
+		resp: pluginapi.HTTPResponse{StatusCode: http.StatusOK, Body: []byte(`{}`)},
+	})
+	m := newManager(testCfg(), &fakeClient{resp: pluginapi.HTTPResponse{StatusCode: http.StatusServiceUnavailable}})
+	if err := m.Refresh(t.Context(), testKey); err == nil {
+		t.Fatal("expected the new configuration's refresh to fail")
+	}
+	// An old-config refresh can finish before the old loop is drained.
+	mustRefresh(t, prev)
+	m.SeedFrom(prev)
+	d := m.Diagnostics()
+	if !d.HasSnapshot || !d.Stale || d.RoutableCount != 0 ||
+		d.LastSuccess == nil || d.LastFailure == nil || d.LastFailureCategory != "http 503" ||
+		len(d.Warnings) != 1 || !strings.Contains(d.Warnings[0], "missing") {
+		t.Fatalf("seeded refresh state or decode warning lost: %+v", d)
 	}
 }

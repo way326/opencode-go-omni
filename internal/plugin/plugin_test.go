@@ -230,7 +230,7 @@ func installFastLoop(t *testing.T, m *Manager, yamlText string) {
 	stop, done := make(chan struct{}), make(chan struct{})
 	m.stop, m.done = stop, done
 	m.mu.Unlock()
-	m.startRefreshLoop(cfg, mgr, 5*time.Millisecond, stop, done)
+	m.startRefreshLoop(cfg, mgr, 5*time.Millisecond, stop, done, false)
 }
 
 // manualTick runs one tick body (refreshOnce) over the currently served
@@ -239,12 +239,12 @@ func installFastLoop(t *testing.T, m *Manager, yamlText string) {
 func manualTick(t *testing.T, m *Manager) {
 	t.Helper()
 	m.mu.RLock()
-	mgr, cfg := m.mgr, m.cfg
+	mgr := m.mgr
 	m.mu.RUnlock()
 	if mgr == nil {
 		t.Fatal("no served manager to tick")
 	}
-	if err := refreshOnce(context.Background(), mgr, m.bridge, time.Second, cfg); err != nil {
+	if err := refreshOnce(context.Background(), mgr, m.bridge, time.Second); err != nil {
 		t.Fatalf("tick refresh: %v", err)
 	}
 }
