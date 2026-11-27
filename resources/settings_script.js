@@ -132,15 +132,46 @@ window.initializeSettingsPanel = (() => {
         const remove = document.createElement("button");
         remove.className = "settings-button settings-button-danger";
         remove.type = "button";
-        remove.textContent = "删除";
-        remove.setAttribute("aria-label", "删除 Key " + (index + 1));
+        remove.textContent = "从配置移除";
+        remove.setAttribute("aria-label", "从本插件配置移除 Key " + (index + 1));
+        remove.setAttribute("aria-expanded", "false");
+        const confirmation = document.createElement("div");
+        confirmation.className = "settings-full";
+        confirmation.hidden = true;
+        const note = document.createElement("p");
+        note.className = "settings-help";
+        note.setAttribute("role", "status");
+        note.textContent = "将此 Key 从本插件配置列表中移除？不会删除 CPA 已生成的 Auth 记录，也不会撤销上游 Key。若 CPA 仍选择旧记录，相关请求可能因未知凭据失败。保存设置后才生效。";
+        const confirmRemoval = document.createElement("button");
+        confirmRemoval.className = "settings-button settings-button-danger";
+        confirmRemoval.type = "button";
+        confirmRemoval.textContent = "确认移除";
+        const cancelRemoval = document.createElement("button");
+        cancelRemoval.className = "settings-button";
+        cancelRemoval.type = "button";
+        cancelRemoval.textContent = "取消";
         remove.addEventListener("click", () => {
+          confirmation.hidden = false;
+          remove.setAttribute("aria-expanded", "true");
+          cancelRemoval.focus();
+        });
+        cancelRemoval.addEventListener("click", () => {
+          confirmation.hidden = true;
+          remove.setAttribute("aria-expanded", "false");
+          remove.focus();
+        });
+        confirmRemoval.addEventListener("click", () => {
           apiKeys.splice(index, 1);
           apiKeysChanged = true;
           renderKeys();
+          document.getElementById("add-key").focus();
         });
+        const confirmationActions = document.createElement("div");
+        confirmationActions.className = "settings-key-controls";
+        confirmationActions.append(cancelRemoval, confirmRemoval);
+        confirmation.append(note, confirmationActions);
         controls.append(reveal, remove);
-        row.append(field, controls);
+        row.append(field, controls, confirmation);
         keyList.appendChild(row);
       });
     }

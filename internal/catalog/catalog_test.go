@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"reflect"
 	"strings"
@@ -382,6 +383,65 @@ func TestRefreshErrorsKeepStaleSnapshot(t *testing.T) {
 	}
 }
 
+type hostClientFunc func(context.Context, pluginapi.HTTPRequest) (pluginapi.HTTPResponse, error)
+
+func (f hostClientFunc) Do(ctx context.Context, req pluginapi.HTTPRequest) (pluginapi.HTTPResponse, error) {
+	return f(ctx, req)
+}
+
+func TestRefreshConfiguredPublishesOnlyAfterFailoverFinishes(t *testing.T) {
+	for _, tt := range []struct {
+		first, second int
+		wantAttempts  int
+	}{
+		{http.StatusUnauthorized, http.StatusOK, 2},
+		{http.StatusForbidden, http.StatusOK, 2},
+		{http.StatusUnauthorized, http.StatusForbidden, 2},
+		{http.StatusTooManyRequests, 0, 1},
+		{http.StatusServiceUnavailable, 0, 1},
+	} {
+		t.Run(fmt.Sprintf("%d_to_%d", tt.first, tt.second), func(t *testing.T) {
+			cfg := testCfg()
+			cfg.APIKeys = []config.APIKey{{Value: "discovery-first"}, {Value: "discovery-second"}}
+			cfg.Catalog.StaleWhileUnavailable = false
+			var m *Manager
+			m = New(cfg, hostClientFunc(func(_ context.Context, req pluginapi.HTTPRequest) (pluginapi.HTTPResponse, error) {
+				switch req.Headers.Get("Authorization") {
+				case "Bearer " + testKey:
+					return pluginapi.HTTPResponse{StatusCode: http.StatusOK, Body: []byte(`{"data":[{"id":"glm-old"}]}`)}, nil
+				case "Bearer discovery-first":
+					return pluginapi.HTTPResponse{StatusCode: tt.first}, nil
+				case "Bearer discovery-second":
+					if _, ok := m.Lookup("glm-old"); !ok {
+						t.Error("in-progress failover removed the previously served model")
+					}
+					if d := m.Diagnostics(); d.LastFailure != nil || d.Stale {
+						t.Errorf("in-progress failover published a refresh failure: %+v", d)
+					}
+					return pluginapi.HTTPResponse{StatusCode: tt.second, Body: []byte(`{"data":[{"id":"glm-new"}]}`)}, nil
+				default:
+					t.Fatal("unexpected catalog authentication")
+					return pluginapi.HTTPResponse{}, nil
+				}
+			}))
+			mustRefresh(t, m)
+			attempts, err := m.RefreshConfigured(t.Context())
+			if attempts != tt.wantAttempts || (err == nil) != (tt.second == http.StatusOK) {
+				t.Fatalf("RefreshConfigured = (%d, %v)", attempts, err)
+			}
+			d := m.Diagnostics()
+			if err == nil {
+				findModel(t, m.Models(), "glm-new")
+				if d.LastFailure != nil || d.Stale || !d.HasSnapshot {
+					t.Errorf("successful failover diagnostics = %+v", d)
+				}
+			} else if d.HasSnapshot || d.Stale || d.LastFailure == nil || d.RoutableCount != 0 {
+				t.Errorf("failed round must clear fail-closed catalog: %+v", d)
+			}
+		})
+	}
+}
+
 // TestFetchBudgetFloor pins the catalogBudgetFloor fix: an undersized
 // max-response-bytes must not make every refresh fail permanently when the
 // live catalog is larger than the knob (with stale-while-unavailable:false
@@ -446,6 +506,9 @@ func TestRefreshErrorClearsWhenNoStale(t *testing.T) {
 	}
 	if got := m.Warnings(); len(got) != 0 {
 		t.Errorf("warnings not cleared: %+v", got)
+	}
+	if diagnostics := m.Diagnostics(); diagnostics.HasSnapshot || diagnostics.Stale {
+		t.Errorf("fail-closed diagnostics = %+v, want no current snapshot", diagnostics)
 	}
 
 	// Next success restores the routable set.
@@ -521,6 +584,10 @@ func TestSeedFromServesOldRecordsWithNewCfg(t *testing.T) {
 	fc := &fakeClient{}
 	m := newManager(cfg, fc)
 	m.SeedFrom(prev)
+	if seeded, original := m.Diagnostics(), prev.Diagnostics(); seeded.LastSuccess == nil ||
+		!seeded.LastSuccess.Equal(*original.LastSuccess) || !seeded.HasSnapshot || seeded.Stale {
+		t.Fatalf("seed must retain the source snapshot status: %+v", seeded)
+	}
 
 	got := m.Models()
 	if len(got) != 1 || got[0].UpstreamID != "glm-5.2" || got[0].PublicID != "glm-5.2" {
@@ -725,7 +792,7 @@ func TestProtocolEnabledUnknownRouteDefaultsTrue(t *testing.T) {
 func TestOverrideApplicationRecordedInWarnings(t *testing.T) {
 	cfg := testCfg()
 	cfg.RouteOverrides = map[string]config.RouteOverride{
-		"weird-model": {Protocol: "chat-completions", Endpoint: "/v1/custom"},
+		"weird-model": {Protocol: "chat-completions", Endpoint: "/v1/custom?key=private-override-fixture"},
 	}
 	fc := &fakeClient{resp: pluginapi.HTTPResponse{
 		StatusCode: 200,
@@ -736,8 +803,13 @@ func TestOverrideApplicationRecordedInWarnings(t *testing.T) {
 
 	warns := m.Warnings()
 	if len(warns) != 1 || !strings.Contains(warns[0], `model "weird-model" routed via user override`) ||
-		!strings.Contains(warns[0], "chat-completions /v1/custom") {
+		!strings.Contains(warns[0], "(chat-completions)") ||
+		strings.Contains(warns[0], "private-override-fixture") {
 		t.Fatalf("override warning wrong: %+v", warns)
+	}
+	findModel(t, m.Models(), "weird-model")
+	if got := m.Diagnostics().Warnings; len(got) != 1 || got[0] != warns[0] {
+		t.Fatalf("override diagnostic mismatch: %+v", got)
 	}
 }
 

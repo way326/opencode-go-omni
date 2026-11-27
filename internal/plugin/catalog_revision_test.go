@@ -182,9 +182,9 @@ func TestRevisionTracksFailClosedClear(t *testing.T) {
 
 	succeed.Store(false)
 	m.mu.RLock()
-	mgr, cfg := m.mgr, m.cfg
+	mgr := m.mgr
 	m.mu.RUnlock()
-	if err := refreshOnce(t.Context(), mgr, m.bridge, time.Second, cfg); err == nil {
+	if err := refreshOnce(t.Context(), mgr, m.bridge, time.Second); err == nil {
 		t.Fatal("fail-closed refresh unexpectedly succeeded")
 	}
 	models := m.servedModelInfos()

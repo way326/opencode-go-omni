@@ -13,6 +13,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 
+	"github.com/way326/opencode-go-omni/internal/catalog"
 	"github.com/way326/opencode-go-omni/internal/config"
 	"github.com/way326/opencode-go-omni/resources"
 )
@@ -77,6 +78,9 @@ func (m *Manager) HandleManagement(ctx context.Context, req pluginapi.Management
 	if req.Method == http.MethodGet && req.Path == version+"/resource/plugins/"+pluginName+"/quota" {
 		return quotaPageResponse(version)
 	}
+	if req.Method == http.MethodGet && req.Path == version+"/management/plugins/"+pluginName+"/catalog-diagnostics" {
+		return m.handleCatalogDiagnostics()
+	}
 	if req.Method != http.MethodPost || req.Path != version+"/management/plugins/"+pluginName+"/quota-usage" {
 		return pluginapi.ManagementResponse{StatusCode: http.StatusNotFound, Body: []byte(`{"error":"not found"}`)}, nil
 	}
@@ -131,6 +135,28 @@ func (m *Manager) HandleManagement(ctx context.Context, req pluginapi.Management
 	return pluginapi.ManagementResponse{StatusCode: http.StatusNotFound, Body: []byte(`{"error":"unknown quota key"}`)}, nil
 }
 
+func (m *Manager) handleCatalogDiagnostics() (pluginapi.ManagementResponse, error) {
+	m.mu.RLock()
+	mgr := m.mgr
+	m.mu.RUnlock()
+	if mgr == nil {
+		return catalogDiagnosticsJSON(catalog.Diagnostics{
+			Models:   []catalog.ModelDiagnostic{},
+			Excluded: []catalog.UnsupportedModel{},
+			Warnings: []string{},
+		})
+	}
+	return catalogDiagnosticsJSON(mgr.Diagnostics())
+}
+
+func catalogDiagnosticsJSON(diagnostics catalog.Diagnostics) (pluginapi.ManagementResponse, error) {
+	response, err := quotaJSON(diagnostics)
+	if err == nil {
+		response.Headers.Set("Cache-Control", "no-store")
+	}
+	return response, err
+}
+
 func quotaPageResponse(version string) (pluginapi.ManagementResponse, error) {
 	nonceBytes := make([]byte, 18)
 	if _, err := rand.Read(nonceBytes); err != nil {
@@ -139,13 +165,16 @@ func quotaPageResponse(version string) (pluginapi.ManagementResponse, error) {
 	nonce := base64.RawURLEncoding.EncodeToString(nonceBytes)
 
 	page := strings.ReplaceAll(resources.QuotaPage, "__QUOTA_ENDPOINT__", version+"/management/plugins/"+pluginName+"/quota-usage")
+	// CPA mounts plugin-owned management routes under /v0/management,
+	// even when its built-in management APIs also have a /v8 version.
+	page = strings.ReplaceAll(page, "__DIAGNOSTICS_ENDPOINT__", "/v0/management/plugins/"+pluginName+"/catalog-diagnostics")
 	page = strings.ReplaceAll(page, "__SETTINGS_FORM__", resources.SettingsForm)
 	page = strings.ReplaceAll(page, "__SETTINGS_STYLES__", resources.SettingsStyles)
 	page = strings.ReplaceAll(page, "__SETTINGS_SCRIPT__", resources.SettingsScript)
 	if strings.Count(page, "<script>") != 2 || strings.Count(page, "<style>") != 1 {
 		return pluginapi.ManagementResponse{}, fmt.Errorf("quota page inline resource shape changed")
 	}
-	for _, placeholder := range []string{"__QUOTA_ENDPOINT__", "__SETTINGS_FORM__", "__SETTINGS_STYLES__", "__SETTINGS_SCRIPT__"} {
+	for _, placeholder := range []string{"__QUOTA_ENDPOINT__", "__DIAGNOSTICS_ENDPOINT__", "__SETTINGS_FORM__", "__SETTINGS_STYLES__", "__SETTINGS_SCRIPT__"} {
 		if strings.Contains(page, placeholder) {
 			return pluginapi.ManagementResponse{}, fmt.Errorf("quota page placeholder %s was not materialized", placeholder)
 		}

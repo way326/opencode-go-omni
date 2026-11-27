@@ -3,8 +3,9 @@
 // (FR-002, FR-003, FR-004, FR-010).
 //
 // Route resolution priority follows arch spec §5: user route override >
-// built-in compatibility table > upstream protocol metadata > family prefix >
-// unsupported (excluded from the routable set, kept in diagnostics).
+// unavailable-model block > built-in compatibility table > upstream protocol
+// metadata > family prefix > unsupported (excluded from the routable set,
+// retained in diagnostics).
 //
 // No scheduling lives here; M3 wires the refresh cadence.
 package catalog
@@ -18,6 +19,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 
@@ -29,6 +31,17 @@ import (
 // completion bodies, so the fetch budget never drops below 16 MiB while
 // max-response-bytes stays meaningful for completions elsewhere.
 const catalogBudgetFloor = 16 << 20
+
+type refreshError struct {
+	category   string
+	statusCode int
+}
+
+func (e *refreshError) Error() string { return "catalog refresh failed: " + e.category }
+
+func (e *refreshError) isAuthenticationFailure() bool {
+	return e.statusCode == http.StatusUnauthorized || e.statusCode == http.StatusForbidden
+}
 
 // Route is the upstream protocol a model is served through (FR-004).
 type Route string
@@ -112,6 +125,7 @@ type ModelRecord struct {
 	UpstreamID   string
 	DisplayName  string
 	Protocol     Route
+	RouteSource  string
 	EndpointPath string
 	ContextLimit int64
 	OutputLimit  int64
@@ -136,8 +150,29 @@ func (r ModelRecord) StreamEndpointPath() string {
 // UnsupportedModel is a discovered model excluded from the routable set,
 // retained for diagnostics (FR-004, open questions §10).
 type UnsupportedModel struct {
-	UpstreamID string
-	Reason     string
+	UpstreamID string `json:"upstream_id,omitempty"`
+	Reason     string `json:"reason"`
+}
+
+// Diagnostics is a redacted view of the shared catalog snapshot.
+type Diagnostics struct {
+	LastSuccess         *time.Time         `json:"last_success,omitempty"`
+	LastFailure         *time.Time         `json:"last_failure,omitempty"`
+	LastFailureCategory string             `json:"last_failure_category,omitempty"`
+	HasSnapshot         bool               `json:"has_snapshot"`
+	Stale               bool               `json:"stale"`
+	RoutableCount       int                `json:"routable_count"`
+	Models              []ModelDiagnostic  `json:"models"`
+	Excluded            []UnsupportedModel `json:"excluded"`
+	Warnings            []string           `json:"warnings"`
+}
+
+type ModelDiagnostic struct {
+	ClientID    string `json:"client_id"`
+	UpstreamID  string `json:"upstream_id"`
+	Name        string `json:"name"`
+	Protocol    Route  `json:"protocol"`
+	RouteSource string `json:"route_source"`
 }
 
 // HostClient issues HTTP requests through the host (pluginapi.HTTPDo
@@ -306,7 +341,15 @@ type Manager struct {
 	cfg    config.Config
 	client HostClient
 
-	mu sync.Mutex
+	mu          sync.Mutex
+	snapshot    catalogSnapshot
+	lastSuccess time.Time
+	lastFailure time.Time
+	lastError   string
+	stale       bool
+}
+
+type catalogSnapshot struct {
 	// raw retains the decoded upstream entries behind the current snapshot
 	// so SeedFrom can rebuild records against a NEW config (route overrides,
 	// protocol flags, and prefix settings may all have changed since the
@@ -314,10 +357,11 @@ type Manager struct {
 	raw    []rawModel
 	models []ModelRecord
 	// index maps both PublicID and UpstreamID to their record so ID
-	// resolution is O(1); rebuilt atomically with models on every swap.
-	index map[string]ModelRecord
-	unsup []UnsupportedModel
-	warns []string
+	// resolution is O(1). A nil index denotes no snapshot.
+	index       map[string]ModelRecord
+	unsup       []UnsupportedModel
+	warns       []string
+	decodeWarns []string
 }
 
 // New returns a Manager serving cfg through the host client.
@@ -341,21 +385,73 @@ func New(cfg config.Config, client HostClient) *Manager {
 // outage ends.
 func (m *Manager) SeedFrom(prev *Manager) {
 	prev.mu.Lock()
-	raw := prev.raw
+	snapshot := prev.snapshot
+	lastSuccess, lastFailure, lastError := prev.lastSuccess, prev.lastFailure, prev.lastError
+	sourceStale := prev.stale
 	prev.mu.Unlock()
-	m.swap(raw)
+	if snapshot.index == nil {
+		return
+	}
+	rebuilt := m.buildSnapshot(snapshot.raw, snapshot.decodeWarns...)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.snapshot = rebuilt
+	// Keep this configuration's failed refresh if it has one. The retiring
+	// manager may have completed a later attempt under the previous config.
+	m.stale = m.lastFailure.After(m.lastSuccess) || sourceStale
+	if m.lastFailure.IsZero() {
+		m.lastFailure, m.lastError = lastFailure, lastError
+	}
+	m.lastSuccess = lastSuccess
 }
 
-// Refresh fetches and swaps the catalog snapshot. On failure it returns a
-// classified, key-free error; the previous snapshot keeps serving while
-// catalog.stale-while-unavailable is enabled, otherwise the routable set
-// is cleared until the next success (FR-002).
+// Refresh refreshes the catalog using a single discovery key.
 func (m *Manager) Refresh(ctx context.Context, apiKey string) error {
+	_, err := m.refresh(ctx, []config.APIKey{{Value: apiKey}})
+	return err
+}
+
+// RefreshConfigured refreshes the shared snapshot with the configured keys
+// in order. Only HTTP 401/403 allow another attempt, under the same context.
+// The result and stale policy are published once, after the whole round.
+func (m *Manager) RefreshConfigured(ctx context.Context) (attempts int, err error) {
+	return m.refresh(ctx, m.cfg.APIKeys)
+}
+
+func (m *Manager) refresh(ctx context.Context, keys []config.APIKey) (int, error) {
+	failure := &refreshError{category: "no configured api key"}
+	attempts := 0
+	for _, key := range keys {
+		if ctx.Err() != nil {
+			failure = &refreshError{category: "request canceled or timed out"}
+			break
+		}
+		attempts++
+		entries, warns, err := m.fetch(ctx, key.Value)
+		if err == nil {
+			snapshot := m.buildSnapshot(entries, warns...)
+			m.mu.Lock()
+			m.snapshot = snapshot
+			m.lastSuccess = time.Now()
+			m.stale = false
+			m.mu.Unlock()
+			return attempts, nil
+		}
+		failure = err
+		if !err.isAuthenticationFailure() || ctx.Err() != nil {
+			break
+		}
+	}
+	m.recordFailure(failure)
+	return attempts, failure
+}
+
+func (m *Manager) fetch(ctx context.Context, apiKey string) ([]rawModel, []string, *refreshError) {
 	if m.client == nil {
 		// Only direct construction can produce a nil host client
 		// (production always wires the bridge); fail loudly through the
 		// classified path instead of panicking inside Do.
-		return m.fail("host client unavailable")
+		return nil, nil, &refreshError{category: "host client unavailable"}
 	}
 	req := pluginapi.HTTPRequest{
 		Method: http.MethodGet,
@@ -367,53 +463,50 @@ func (m *Manager) Refresh(ctx context.Context, apiKey string) error {
 	}
 	resp, err := m.client.Do(ctx, req)
 	if err != nil {
-		return m.fail("network error")
+		return nil, nil, &refreshError{category: "network error"}
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, nil, &refreshError{category: fmt.Sprintf("http %d", resp.StatusCode), statusCode: resp.StatusCode}
 	}
 	budget := max(m.cfg.MaxResponseBytes, catalogBudgetFloor)
 	if int64(len(resp.Body)) > budget {
-		return m.fail("response exceeds max-response-bytes")
-	}
-	if resp.StatusCode != http.StatusOK {
-		return m.fail(fmt.Sprintf("http %d", resp.StatusCode))
+		return nil, nil, &refreshError{category: "response exceeds max-response-bytes"}
 	}
 	var env struct {
 		Data json.RawMessage `json:"data"`
 	}
 	if err := json.Unmarshal(resp.Body, &env); err != nil {
-		return m.fail("invalid json")
+		return nil, nil, &refreshError{category: "invalid json"}
 	}
 	var entries []rawModel
 	var warns []string
 	if env.Data == nil {
 		// Key ABSENCE is upstream shape drift, never an intended clear:
-		// clear like an empty plan (swap(nil)) but leave a diagnostic.
+		// publish an empty catalog but leave a diagnostic.
 		// A present-but-empty array stays silent (tested-intended state).
 		warns = append(warns, `upstream catalog response missing "data" field`)
 	} else if err := json.Unmarshal(env.Data, &entries); err != nil {
-		return m.fail("invalid json")
+		return nil, nil, &refreshError{category: "invalid json"}
 	}
-	m.swap(entries, warns...)
-	return nil
+	return entries, warns, nil
 }
 
-// fail applies the stale policy and returns the classified error.
-func (m *Manager) fail(category string) error {
+// recordFailure applies the stale policy once all fetch attempts have ended.
+func (m *Manager) recordFailure(failure *refreshError) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.lastFailure = time.Now()
+	m.lastError = failure.category
 	if !m.cfg.Catalog.StaleWhileUnavailable {
-		// Clear the index too — Lookup must stop resolving IDs whose
-		// records are gone (FR-002). Raw entries go with them: a cleared
-		// snapshot has nothing to seed.
-		m.raw, m.models, m.index, m.unsup, m.warns = nil, nil, nil, nil, nil
+		m.snapshot = catalogSnapshot{}
 	}
-	return fmt.Errorf("catalog refresh failed: %s", category)
+	m.stale = m.snapshot.index != nil
 }
 
-// swap builds the new snapshot from decoded entries and installs it
-// atomically under the mutex (FR-010 dedup, arch §5 route priority).
+// buildSnapshot resolves decoded entries (FR-010 dedup, arch §5 route priority).
 // extraWarns are caller-supplied snapshot diagnostics (e.g. decode-level
 // shape-drift notices) recorded alongside the per-entry ones.
-func (m *Manager) swap(entries []rawModel, extraWarns ...string) {
+func (m *Manager) buildSnapshot(entries []rawModel, extraWarns ...string) catalogSnapshot {
 	models := make([]ModelRecord, 0, len(entries))
 	index := make(map[string]ModelRecord, len(entries)*2)
 	var unsup []UnsupportedModel
@@ -504,6 +597,7 @@ func (m *Manager) swap(entries []rawModel, extraWarns ...string) {
 			UpstreamID:   e.ID,
 			DisplayName:  display,
 			Protocol:     route,
+			RouteSource:  d.source,
 			EndpointPath: endpoint,
 			ContextLimit: contextLength,
 			OutputLimit:  outputLimit,
@@ -535,9 +629,7 @@ func (m *Manager) swap(entries []rawModel, extraWarns ...string) {
 		index[rec.PublicID] = rec
 		index[rec.UpstreamID] = rec
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.raw, m.models, m.index, m.unsup, m.warns = entries, models, index, unsup, warns
+	return catalogSnapshot{raw: entries, models: models, index: index, unsup: unsup, warns: warns, decodeWarns: extraWarns}
 }
 
 // protocolEnabled reports whether the resolved route's protocol flag is on
@@ -559,17 +651,20 @@ func (m *Manager) protocolEnabled(r Route) bool {
 // routeDecision is the outcome of resolving one catalog entry (arch §5): route
 // is "" when no priority tier matched, endpoint is the model-scoped path for a
 // route without a static one (Gemini) or the path a user override pinned, and
-// warn is the spec 04 §5 diagnostics line for an applied override. reason
-// explains a metadata-bearing entry that could not be mapped safely.
+// warn carries override or route-conflict diagnostics; reason explains a
+// metadata-bearing entry that could not be mapped safely. source identifies
+// the winning routing tier for routable models.
 type routeDecision struct {
 	route    Route
 	endpoint string
 	warn     string
 	reason   string
+	source   string
 }
 
-// resolve applies route priority strictly (arch §5): user override > exact
-// compatibility table > upstream metadata > family prefix table > unsupported.
+// resolve applies route priority strictly (arch §5): user override >
+// unavailable-model block > exact compatibility table > upstream metadata >
+// family prefix table > unsupported.
 func (m *Manager) resolve(e rawModel) routeDecision {
 	if o, ok := m.cfg.RouteOverrides[e.ID]; ok {
 		// Spec 04 §5: an override MUST be visible in diagnostics. Load
@@ -582,17 +677,31 @@ func (m *Manager) resolve(e rawModel) routeDecision {
 		return routeDecision{reason: reason}
 	}
 	if d, ok := exactRoute(id); ok {
+		d.source = "exact_compatibility"
+		if metadata, claimed := resolveUpstreamMetadata(e); claimed && metadata.route != d.route {
+			upstreamDecision := string(metadata.route)
+			if upstreamDecision == "" {
+				upstreamDecision = metadata.reason
+			}
+			if d.warn != "" {
+				d.warn += "; "
+			}
+			d.warn += fmt.Sprintf("route conflict for %q: exact compatibility rule selects %s but upstream metadata reports %s", e.ID, d.route, upstreamDecision)
+		}
 		return d
 	}
 	if d, claimed := resolveUpstreamMetadata(e); claimed {
+		if d.route != "" {
+			d.source = "upstream_metadata"
+		}
 		return d
 	}
 	for _, p := range prefixRoutes {
 		if strings.HasPrefix(id, p.prefix) {
 			if p.route == RouteGemini {
-				return routeDecision{route: p.route, endpoint: geminiEndpoint(e.ID, geminiActionGenerate)}
+				return routeDecision{route: p.route, endpoint: geminiEndpoint(e.ID, geminiActionGenerate), source: "family_fallback"}
 			}
-			return routeDecision{route: p.route}
+			return routeDecision{route: p.route, source: "family_fallback"}
 		}
 	}
 	return routeDecision{}
@@ -658,8 +767,9 @@ func resolveOverride(id string, o config.RouteOverride) routeDecision {
 		}
 		endpoint = geminiEndpoint(strings.ReplaceAll(model, config.GeminiModelPlaceholder, id), action)
 	}
-	return routeDecision{route: route, endpoint: endpoint, warn: fmt.Sprintf(
-		"model %q routed via user override (%s %s)", id, o.Protocol, endpoint)}
+	// Do not log or publish the configured endpoint; it may contain secrets.
+	return routeDecision{route: route, endpoint: endpoint, source: "user_override", warn: fmt.Sprintf(
+		"model %q routed via user override (%s)", id, o.Protocol)}
 }
 
 // JoinUpstreamURL joins the configured base-url onto an endpoint path and
@@ -727,8 +837,8 @@ func normalizeThinking(rt *rawThinking) *pluginapi.ThinkingSupport {
 func (m *Manager) Models() []ModelRecord {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	out := make([]ModelRecord, len(m.models))
-	copy(out, m.models)
+	out := make([]ModelRecord, len(m.snapshot.models))
+	copy(out, m.snapshot.models)
 	return out
 }
 
@@ -738,7 +848,7 @@ func (m *Manager) Models() []ModelRecord {
 func (m *Manager) Lookup(id string) (ModelRecord, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	rec, ok := m.index[id]
+	rec, ok := m.snapshot.index[id]
 	return rec, ok
 }
 
@@ -746,8 +856,8 @@ func (m *Manager) Lookup(id string) (ModelRecord, bool) {
 func (m *Manager) Unsupported() []UnsupportedModel {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	out := make([]UnsupportedModel, len(m.unsup))
-	copy(out, m.unsup)
+	out := make([]UnsupportedModel, len(m.snapshot.unsup))
+	copy(out, m.snapshot.unsup)
 	return out
 }
 
@@ -755,7 +865,41 @@ func (m *Manager) Unsupported() []UnsupportedModel {
 func (m *Manager) Warnings() []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	out := make([]string, len(m.warns))
-	copy(out, m.warns)
+	out := make([]string, len(m.snapshot.warns))
+	copy(out, m.snapshot.warns)
 	return out
+}
+
+// Diagnostics returns a copy of the redacted catalog status and routing
+// projection for read-only management surfaces.
+func (m *Manager) Diagnostics() Diagnostics {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	result := Diagnostics{
+		LastFailureCategory: m.lastError,
+		HasSnapshot:         m.snapshot.index != nil,
+		Stale:               m.stale,
+		RoutableCount:       len(m.snapshot.models),
+		Models:              make([]ModelDiagnostic, 0, len(m.snapshot.models)),
+		Excluded:            append([]UnsupportedModel{}, m.snapshot.unsup...),
+		Warnings:            append([]string{}, m.snapshot.warns...),
+	}
+	if !m.lastSuccess.IsZero() {
+		lastSuccess := m.lastSuccess.UTC()
+		result.LastSuccess = &lastSuccess
+	}
+	if !m.lastFailure.IsZero() {
+		lastFailure := m.lastFailure.UTC()
+		result.LastFailure = &lastFailure
+	}
+	for _, model := range m.snapshot.models {
+		result.Models = append(result.Models, ModelDiagnostic{
+			ClientID:    model.PublicID,
+			UpstreamID:  model.UpstreamID,
+			Name:        model.DisplayName,
+			Protocol:    model.Protocol,
+			RouteSource: model.RouteSource,
+		})
+	}
+	return result
 }

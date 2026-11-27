@@ -6,8 +6,9 @@
 
 - Combine quota and settings under one OpenCode Go Omni resource. Quota is the
   default view; an in-page settings button opens the plugin settings form.
-- Keep route overrides, protocol switches and per-key add/edit/delete/reveal
-  actions in the settings view.
+- Keep route overrides, protocol switches and per-key add/edit/remove/reveal
+  actions in the settings view. Removing a Key from plugin config neither
+  deletes CPA Auth records nor revokes the upstream Key.
 - Let each upstream Key carry an optional remark; use it as the quota-card name
   before falling back to the existing short credential fingerprint. Align the
   key fields and controls and use explicit “显示密钥” / “隐藏密钥” actions.
@@ -19,6 +20,16 @@
   disk writes.
 - Poll the quota list and refresh card names after CPA's asynchronous plugin
   reconfigure applies saved key remarks. Align checkboxes with adjacent fields.
+- Show read-only catalog and route diagnostics: snapshot state, refresh
+  history, route sources, exclusions, and warnings.
+
+### Shared catalog refresh
+
+- Retry failed catalog refreshes using bounded exponential backoff, then
+  resume the configured interval after recovery.
+- Try the next configured discovery Key only on HTTP 401/403, within a single
+  refresh budget. Do not apply the stale policy until the entire refresh
+  fails. Inference still uses the exact credential selected by CPA.
 
 ## 0.2.3 - 2026-11-25
 
